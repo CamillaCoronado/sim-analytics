@@ -326,64 +326,64 @@ export default function ReceiptAnalytics() {
         </div>
 
         {receipts.length === 0 && (
-          <div className="bg-gray-800 rounded-lg p-12 border border-gray-700 text-center">
-            <p className="text-gray-400 text-lg mb-4">waiting for data...</p>
-            <p className="text-gray-500 text-sm mb-6">
-              run bookmarklet on receipts page to copy data, then click below
-            </p>
+          <div className="bg-gray-800 rounded-lg p-12 border border-gray-700">
+            <div className="text-center mb-8">
+              <p className="text-gray-400 text-lg mb-4">waiting for data...</p>
+              <button
+                onClick={handlePaste}
+                className="px-8 py-3 bg-green-600 hover:bg-green-700 text-white rounded-lg transition-colors text-lg font-medium mb-6"
+              >
+                paste receipt data
+              </button>
+            </div>
             
-            <details className="mb-6">
-              <summary className="cursor-pointer text-blue-400 hover:text-blue-300 mb-4">
+            <details className="max-w-2xl mx-auto">
+              <summary className="text-gray-400 cursor-pointer hover:text-gray-300 text-center mb-6 transition-colors">
                 show setup instructions
               </summary>
-              <div className="text-left bg-gray-900 rounded p-4 space-y-4">
-                <div>
-                  <p className="text-gray-400 text-sm mb-2">1. create a new bookmark (cmd+d or ctrl+d)</p>
-                  <p className="text-gray-400 text-sm mb-2">2. name it "scrape receipts"</p>
-                  <p className="text-gray-400 text-sm mb-2">3. paste this code as the url:</p>
-                  <div className="bg-black rounded p-3 overflow-x-auto">
-                    <code className="text-xs text-green-400 break-all">
-                      javascript:(function()&#123;const receipts=[];let bounties=[];document.querySelectorAll('div.flex.items-center.px-2').forEach(el=&#62;&#123;const cloutEl=el.querySelector('.text-green-500, .text-red-500, [class*="text-green"], [class*="text-red"]');const clout=cloutEl?parseInt(cloutEl.textContent.replace(/[^\d-]/g,'')):0;const dateEl=el.querySelector('.opacity-60');const date=dateEl?dateEl.textContent.trim():'';const contentEl=el.querySelector('.flex-1.min-w-0');const content=contentEl?contentEl.textContent.trim():'';let user='you';let concept=null;let action='unknown';if(content.includes('You created a new bounty'))&#123;bounties.push(&#123;clout:Math.abs(clout),date&#125;);action='bounty';&#125;else if(content.includes('daily concept bounty'))&#123;action='daily_bounty';&#125;else if(content.includes('daily sign-in bonus'))&#123;action='daily_signin';&#125;else if(content.includes('You generated a new post draft'))&#123;action='draft_cost';&#125;else if(content.includes('You received a tip from'))&#123;const tipMatch=content.match(/tip from\s+(.+?)\s+for/);user=tipMatch?tipMatch[1]:'unknown';action='tip';&#125;else if(content.includes('liked your post')||content.includes('liked your song'))&#123;const likeMatch=content.match(/^(.+?)\s+liked/);user=likeMatch?likeMatch[1]:'unknown';action='like';&#125;else if(content.includes('used your concept'))&#123;const userMatch=content.match(/^(.+?)\s+used your concept/);user=userMatch?userMatch[1]:'unknown';const conceptMatch=content.match(/concept\s+[^\w\s]*(.+?)\s+to\s+(create|generate)/i);concept=conceptMatch?conceptMatch[1].trim():null;action=conceptMatch?conceptMatch[2]:'use';&#125;receipts.push(&#123;user:user.trim(),action,concept,clout,date,raw:content&#125;);&#125;);const data=&#123;receipts,bounties&#125;;navigator.clipboard.writeText(JSON.stringify(data)).then(()=&#62;alert(`Copied         {receipts.length === 0 && (
-          <div className="bg-gray-800 rounded-lg p-12 border border-gray-700 text-center">
-            <p className="text-gray-400 text-lg mb-4">waiting for data...</p>
-            <p className="text-gray-500 text-sm mb-6">
-              run bookmarklet on receipts page to copy data, then click below
-            </p>
-            <button
-              onClick={handlePaste}
-              className="px-6 py-3 bg-green-600 hover:bg-green-700 text-white rounded-lg transition-colors"
-            >
-              paste receipt data
-            </button>
-          </div>
-        )}#123;receipts.length&#125; receipts (        {receipts.length === 0 && (
-          <div className="bg-gray-800 rounded-lg p-12 border border-gray-700 text-center">
-            <p className="text-gray-400 text-lg mb-4">waiting for data...</p>
-            <p className="text-gray-500 text-sm mb-6">
-              run bookmarklet on receipts page to copy data, then click below
-            </p>
-            <button
-              onClick={handlePaste}
-              className="px-6 py-3 bg-green-600 hover:bg-green-700 text-white rounded-lg transition-colors"
-            >
-              paste receipt data
-            </button>
-          </div>
-        )}#123;bounties.length&#125; bounties need tagging)! Paste into dashboard.`));&#125;)();
-                    </code>
+              
+              <div className="space-y-6 text-left mt-6">
+                <div className="bg-gray-900 rounded p-4 border border-gray-700">
+                  <div className="flex items-start gap-3">
+                    <div className="w-8 h-8 rounded-full bg-green-600 flex items-center justify-center text-white font-bold flex-shrink-0">
+                      1
+                    </div>
+                    <div>
+                      <p className="text-gray-300 mb-2">create a bookmark with this code as the url:</p>
+                      <div className="bg-black rounded p-3 overflow-x-auto">
+                        <code className="text-green-400 text-xs break-all">
+                          javascript:(function()&#123;const receipts=[];let bounties=[];document.querySelectorAll('div.flex.items-center.px-2').forEach(el=&#62;&#123;const cloutEl=el.querySelector('.text-green-500, .text-red-500, [class*="text-green"], [class*="text-red"]');const clout=cloutEl?parseInt(cloutEl.textContent.replace(/[^\d-]/g,'')):0;const dateEl=el.querySelector('.opacity-60');const date=dateEl?dateEl.textContent.trim():'';const contentEl=el.querySelector('.flex-1.min-w-0');const content=contentEl?contentEl.textContent.trim():'';let user='you';let concept=null;let action='unknown';if(content.includes('You created a new bounty'))&#123;bounties.push(&#123;clout:Math.abs(clout),date&#125;);action='bounty';&#125;else if(content.includes('daily concept bounty'))&#123;action='daily_bounty';&#125;else if(content.includes('daily sign-in bonus'))&#123;action='daily_signin';&#125;else if(content.includes('You generated a new post draft'))&#123;action='draft_cost';&#125;else if(content.includes('You received a tip from'))&#123;const tipMatch=content.match(/tip from\s+(.+?)\s+for/);user=tipMatch?tipMatch[1]:'unknown';action='tip';&#125;else if(content.includes('liked your post')||content.includes('liked your song'))&#123;const likeMatch=content.match(/^(.+?)\s+liked/);user=likeMatch?likeMatch[1]:'unknown';action='like';&#125;else if(content.includes('used your concept'))&#123;const userMatch=content.match(/^(.+?)\s+used your concept/);user=userMatch?userMatch[1]:'unknown';const conceptMatch=content.match(/concept\s+[^\w\s]*(.+?)\s+to\s+(create|generate)/i);concept=conceptMatch?conceptMatch[1].trim():null;action=conceptMatch?conceptMatch[2]:'use';&#125;receipts.push(&#123;user:user.trim(),action,concept,clout,date,raw:content&#125;);&#125;);const data=&#123;receipts,bounties&#125;;navigator.clipboard.writeText(JSON.stringify(data)).then(()=&#62;alert`Copied $&#123;receipts.length&#125; receipts ($&#123;bounties.length&#125; bounties need tagging)! Paste into dashboard.`);&#125;)();
+                        </code>
+                      </div>
+                    </div>
                   </div>
                 </div>
-                <p className="text-gray-400 text-sm">4. go to your receipts page and click the bookmark</p>
-                <p className="text-gray-400 text-sm">5. come back here and click "paste receipt data" below</p>
+
+                <div className="bg-gray-900 rounded p-4 border border-gray-700">
+                  <div className="flex items-start gap-3">
+                    <div className="w-8 h-8 rounded-full bg-green-600 flex items-center justify-center text-white font-bold flex-shrink-0">
+                      2
+                    </div>
+                    <div className="flex-1">
+                      <p className="text-gray-300">go to your receipts page and click the bookmarklet</p>
+                      <p className="text-gray-500 text-sm mt-1">this will copy your receipt data to clipboard</p>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="bg-gray-900 rounded p-4 border border-gray-700">
+                  <div className="flex items-start gap-3">
+                    <div className="w-8 h-8 rounded-full bg-green-600 flex items-center justify-center text-white font-bold flex-shrink-0">
+                      3
+                    </div>
+                    <div className="flex-1">
+                      <p className="text-gray-300">come back here and click the button above</p>
+                      <p className="text-gray-500 text-sm mt-1">your data will load automatically</p>
+                    </div>
+                  </div>
+                </div>
               </div>
             </details>
-            
-            <button
-              onClick={handlePaste}
-              className="px-6 py-3 bg-green-600 hover:bg-green-700 text-white rounded-lg transition-colors"
-            >
-              paste receipt data
-            </button>
           </div>
         )}
 
