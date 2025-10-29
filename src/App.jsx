@@ -6,6 +6,12 @@ const COLORS = ['#10b981', '#3b82f6', '#8b5cf6', '#f59e0b', '#ef4444'];
 export default function ReceiptAnalytics() {
   const [receipts, setReceipts] = useState([]);
   const [timeFilter, setTimeFilter] = useState('all');
+  const [bounties, setBounties] = useState({});
+  const [untaggedBounties, setUntaggedBounties] = useState([]);
+  const [showBountyModal, setShowBountyModal] = useState(false);
+  const [selectedBounty, setSelectedBounty] = useState(null);
+  const [selectedConcept, setSelectedConcept] = useState('');
+  const [activeTab, setActiveTab] = useState('concepts');
 
   useEffect(() => {
     const stored = localStorage.getItem('receipt_data');
@@ -17,38 +23,87 @@ export default function ReceiptAnalytics() {
         console.error('failed to parse stored receipts:', e);
       }
     }
+    
+    const storedBounties = localStorage.getItem('bounty_data');
+    if (storedBounties) {
+      try {
+        setBounties(JSON.parse(storedBounties));
+      } catch (e) {
+        console.error('failed to parse bounties:', e);
+      }
+    }
+
+    const storedUntagged = localStorage.getItem('untagged_bounties');
+    if (storedUntagged) {
+      try {
+        setUntaggedBounties(JSON.parse(storedUntagged));
+      } catch (e) {
+        console.error('failed to parse untagged bounties:', e);
+      }
+    }
   }, []);
 
   const handlePaste = async () => {
     try {
       const text = await navigator.clipboard.readText();
       const parsed = JSON.parse(text);
-      setReceipts(parsed);
-      localStorage.setItem('receipt_data', text);
+      
+      if (parsed.receipts && Array.isArray(parsed.receipts)) {
+        setReceipts(parsed.receipts);
+        localStorage.setItem('receipt_data', JSON.stringify(parsed.receipts));
+        
+        if (parsed.bounties && parsed.bounties.length > 0) {
+          setUntaggedBounties(parsed.bounties);
+          localStorage.setItem('untagged_bounties', JSON.stringify(parsed.bounties));
+          alert(`${parsed.receipts.length} receipts loaded. ${parsed.bounties.length} bounties need to be tagged.`);
+        }
+      } else if (Array.isArray(parsed)) {
+        setReceipts(parsed);
+        localStorage.setItem('receipt_data', JSON.stringify(parsed));
+      }
     } catch (e) {
+      console.error(e);
       alert('failed to paste - make sure you copied valid receipt data');
     }
   };
 
   const handleClear = () => {
     localStorage.removeItem('receipt_data');
+    localStorage.removeItem('bounty_data');
+    localStorage.removeItem('untagged_bounties');
     setReceipts([]);
+    setBounties({});
+    setUntaggedBounties([]);
   };
 
-  const filteredReceipts = timeFilter === '24h' 
-    ? receipts.filter(r => {
-        try {
-          const dateStr = r.date.replace(/\s+/g, ' ').trim();
-          const now = new Date();
-          const currentYear = now.getFullYear();
-          const receiptDate = new Date(`${dateStr} ${currentYear}`);
-          const hoursDiff = (now - receiptDate) / (1000 * 60 * 60);
-          return hoursDiff <= 24 && hoursDiff >= 0;
-        } catch {
-          return true;
-        }
-      })
-    : receipts;
+  const handleAddBounty = () => {
+    if (!selectedConcept || !selectedBounty) return;
+    
+    let conceptBounties = bounties[selectedConcept] || [];
+    if (!Array.isArray(conceptBounties)) {
+      conceptBounties = [];
+    }
+    
+    conceptBounties.push({
+      amount: selectedBounty.clout,
+      date: selectedBounty.date
+    });
+    
+    const newBounties = { 
+      ...bounties, 
+      [selectedConcept]: conceptBounties
+    };
+    setBounties(newBounties);
+    localStorage.setItem('bounty_data', JSON.stringify(newBounties));
+    
+    const remaining = untaggedBounties.filter((_, i) => i !== selectedBounty.index);
+    setUntaggedBounties(remaining);
+    localStorage.setItem('untagged_bounties', JSON.stringify(remaining));
+    
+    setShowBountyModal(false);
+    setSelectedConcept('');
+    setSelectedBounty(null);
+  };
 
   const parseReceiptDate = (dateStr) => {
     try {
@@ -68,7 +123,6 @@ export default function ReceiptAnalytics() {
       const now = new Date();
       const date = new Date(now.getFullYear(), month, day, hour, minute);
       
-      // if date is in future, assume it's from last year
       if (date > now) {
         date.setFullYear(now.getFullYear() - 1);
       }
@@ -78,6 +132,16 @@ export default function ReceiptAnalytics() {
       return null;
     }
   };
+
+  const filteredReceipts = timeFilter === '24h' 
+    ? receipts.filter(r => {
+        const receiptDate = parseReceiptDate(r.date);
+        if (!receiptDate) return true;
+        const now = new Date();
+        const hoursDiff = (now - receiptDate) / (1000 * 60 * 60);
+        return hoursDiff <= 24 && hoursDiff >= 0;
+      })
+    : receipts;
 
   const getDateRange = () => {
     if (filteredReceipts.length === 0) return '';
@@ -89,19 +153,73 @@ export default function ReceiptAnalytics() {
     return `${oldest.toLocaleDateString()} - ${newest.toLocaleDateString()}`;
   };
 
-  const totalCoins = filteredReceipts.reduce((sum, r) => sum + r.coins, 0);
-  const avgCoins = filteredReceipts.length ? (totalCoins / filteredReceipts.length).toFixed(1) : 0;
+  const totalClout = filteredReceipts.reduce((sum, r) => sum + (r.clout || 0), 0);
+  const avgClout = filteredReceipts.length ? (totalClout / filteredReceipts.length).toFixed(1) : 0;
   
   const conceptStats = filteredReceipts.reduce((acc, r) => {
     if (r.concept) {
-      acc[r.concept] = (acc[r.concept] || 0) + r.coins;
+      acc[r.concept] = (acc[r.concept] || 0) + (r.clout || 0);
     }
     return acc;
   }, {});
   
   const conceptData = Object.entries(conceptStats)
-    .map(([name, coins]) => ({ name, coins }))
-    .sort((a, b) => b.coins - a.coins);
+    .map(([name, clout]) => {
+      const conceptBounties = Array.isArray(bounties[name]) ? bounties[name] : [];
+      
+      const bountyWindows = conceptBounties.map(bounty => {
+        const bountyDate = parseReceiptDate(bounty.date);
+        if (!bountyDate) return { amount: bounty.amount, earned: 0, roi: -100 };
+        
+        const windowEnd = new Date(bountyDate.getTime() + 24 * 60 * 60 * 1000);
+        
+        const windowEarnings = filteredReceipts
+          .filter(r => {
+            if (r.concept !== name) return false;
+            const receiptDate = parseReceiptDate(r.date);
+            if (!receiptDate) return false;
+            return receiptDate >= bountyDate && receiptDate <= windowEnd;
+          })
+          .reduce((sum, r) => sum + (r.clout || 0), 0);
+        
+        const roi = bounty.amount > 0 ? (((windowEarnings - bounty.amount) / bounty.amount) * 100).toFixed(0) : 0;
+        
+        return {
+          amount: bounty.amount,
+          date: bounty.date,
+          earned: windowEarnings,
+          roi: parseInt(roi)
+        };
+      });
+      
+      const totalBountyCost = conceptBounties.reduce((sum, b) => sum + b.amount, 0);
+      const totalBountyEarnings = bountyWindows.reduce((sum, w) => sum + w.earned, 0);
+      const netIncome = clout - totalBountyCost;
+      const avgRoi = bountyWindows.length > 0 
+        ? Math.round(bountyWindows.reduce((sum, w) => sum + w.roi, 0) / bountyWindows.length)
+        : 0;
+      
+      const uses = filteredReceipts.filter(r => r.concept === name).length;
+      const paidUses = filteredReceipts.filter(r => r.concept === name && (r.clout || 0) > 0).length;
+      const freeUses = uses - paidUses;
+      const avgPerUse = uses > 0 ? (clout / uses).toFixed(1) : 0;
+      
+      return { 
+        name, 
+        clout, 
+        bountyCost: totalBountyCost,
+        bountyEarnings: totalBountyEarnings,
+        bountyWindows,
+        netIncome,
+        avgRoi,
+        uses,
+        paidUses,
+        freeUses,
+        avgPerUse,
+        profitable: netIncome > 0
+      };
+    })
+    .sort((a, b) => b.netIncome - a.netIncome);
   
   const userStats = filteredReceipts.reduce((acc, r) => {
     if (r.user !== 'you') {
@@ -117,14 +235,14 @@ export default function ReceiptAnalytics() {
 
   const userValueStats = filteredReceipts.reduce((acc, r) => {
     if (r.user !== 'you') {
-      acc[r.user] = (acc[r.user] || 0) + r.coins;
+      acc[r.user] = (acc[r.user] || 0) + (r.clout || 0);
     }
     return acc;
   }, {});
 
   const topValueUsers = Object.entries(userValueStats)
-    .map(([name, coins]) => ({ name, coins }))
-    .sort((a, b) => b.coins - a.coins)
+    .map(([name, clout]) => ({ name, clout }))
+    .sort((a, b) => b.clout - a.clout)
     .slice(0, 10);
   
   const actionStats = filteredReceipts.reduce((acc, r) => {
@@ -135,36 +253,38 @@ export default function ReceiptAnalytics() {
   const actionData = Object.entries(actionStats)
     .map(([name, value]) => ({ name, value }));
 
-  const timeOfDayStats = filteredReceipts.reduce((acc, r) => {
-    try {
-      const timeMatch = r.date.match(/(\d+):(\d+)\s+(AM|PM)/);
-      if (timeMatch) {
-        let hour = parseInt(timeMatch[1]);
-        const isPM = timeMatch[3] === 'PM';
-        if (isPM && hour !== 12) hour += 12;
-        if (!isPM && hour === 12) hour = 0;
-        acc[hour] = (acc[hour] || 0) + r.coins;
-      }
-    } catch {}
-    return acc;
-  }, {});
+  const timeOfDayStats = filteredReceipts
+    .filter(r => ['like', 'tip'].includes(r.action))
+    .reduce((acc, r) => {
+      try {
+        const timeMatch = r.date.match(/(\d+):(\d+)\s+(AM|PM)/);
+        if (timeMatch) {
+          let hour = parseInt(timeMatch[1]);
+          const isPM = timeMatch[3] === 'PM';
+          if (isPM && hour !== 12) hour += 12;
+          if (!isPM && hour === 12) hour = 0;
+          acc[hour] = (acc[hour] || 0) + (r.clout || 0);
+        }
+      } catch {}
+      return acc;
+    }, {});
 
   const timeOfDayData = Object.entries(timeOfDayStats)
-    .map(([hour, coins]) => ({
+    .map(([hour, clout]) => ({
       hour: `${hour}:00`,
-      coins
+      clout
     }))
     .sort((a, b) => parseInt(a.hour) - parseInt(b.hour));
   
-  const coinFlow = filteredReceipts
+  const cloutFlow = filteredReceipts
     .slice()
     .reverse()
     .reduce((acc, r, i) => {
       const prev = acc[i - 1]?.total || 0;
       acc.push({ 
         index: i, 
-        coins: r.coins,
-        total: prev + r.coins,
+        clout: r.clout || 0,
+        total: prev + (r.clout || 0),
         label: `${i}`
       });
       return acc;
@@ -224,14 +344,14 @@ export default function ReceiptAnalytics() {
           <>
             <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
               <div className="bg-gray-800 rounded-lg p-6 border border-gray-700">
-                <p className="text-gray-400 text-sm mb-1">total coins</p>
-                <p className={`text-3xl font-bold ${totalCoins >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-                  {totalCoins > 0 ? '+' : ''}{totalCoins}¢
+                <p className="text-gray-400 text-sm mb-1">total clout</p>
+                <p className={`text-3xl font-bold ${totalClout >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                  {totalClout > 0 ? '+' : ''}{totalClout}¢
                 </p>
               </div>
               <div className="bg-gray-800 rounded-lg p-6 border border-gray-700">
                 <p className="text-gray-400 text-sm mb-1">avg per action</p>
-                <p className="text-3xl font-bold text-blue-400">{avgCoins}¢</p>
+                <p className="text-3xl font-bold text-blue-400">{avgClout}¢</p>
               </div>
               <div className="bg-gray-800 rounded-lg p-6 border border-gray-700">
                 <p className="text-gray-400 text-sm mb-1">total actions</p>
@@ -243,141 +363,257 @@ export default function ReceiptAnalytics() {
               </div>
             </div>
 
-            <div className="bg-gray-800 rounded-lg p-6 mb-8 border border-gray-700">
-              <h2 className="text-xl font-bold text-green-400 mb-4">cumulative coin flow</h2>
-              <ResponsiveContainer width="100%" height={300}>
-                <LineChart data={coinFlow}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
-                  <XAxis dataKey="label" stroke="#9ca3af" />
-                  <YAxis stroke="#9ca3af" />
-                  <Tooltip 
-                    contentStyle={{ backgroundColor: '#1f2937', border: '1px solid #374151' }}
-                    labelStyle={{ color: '#9ca3af' }}
-                  />
-                  <Line type="monotone" dataKey="total" stroke="#10b981" strokeWidth={2} dot={false} />
-                  <Line type="monotone" dataKey="coins" stroke="#3b82f6" strokeWidth={1} dot={false} />
-                </LineChart>
-              </ResponsiveContainer>
+            <div className="flex gap-2 mb-6 border-b border-gray-700">
+              <button
+                onClick={() => setActiveTab('concepts')}
+                className={`px-6 py-3 font-medium transition-colors ${
+                  activeTab === 'concepts' 
+                    ? 'text-green-400 border-b-2 border-green-400' 
+                    : 'text-gray-400 hover:text-gray-300'
+                }`}
+              >
+                concepts
+              </button>
+              <button
+                onClick={() => setActiveTab('analytics')}
+                className={`px-6 py-3 font-medium transition-colors ${
+                  activeTab === 'analytics' 
+                    ? 'text-green-400 border-b-2 border-green-400' 
+                    : 'text-gray-400 hover:text-gray-300'
+                }`}
+              >
+                analytics
+              </button>
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-8 mb-8">
-              {conceptData.length > 0 && (
-                <div className="bg-gray-800 rounded-lg p-6 border border-gray-700">
-                  <h2 className="text-xl font-bold text-green-400 mb-4">concept roi</h2>
-                  <ResponsiveContainer width="100%" height={300}>
-                    <BarChart data={conceptData}>
-                      <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
-                      <XAxis dataKey="name" stroke="#9ca3af" angle={-45} textAnchor="end" height={100} />
-                      <YAxis stroke="#9ca3af" />
-                      <Tooltip 
-                        contentStyle={{ backgroundColor: '#1f2937', border: '1px solid #374151' }}
-                      />
-                      <Bar dataKey="coins" fill="#10b981" />
-                    </BarChart>
-                  </ResponsiveContainer>
+            {activeTab === 'concepts' && conceptData.length > 0 && (
+              <div className="bg-gray-800 rounded-lg p-6 border border-gray-700 mb-8">
+                <div className="flex justify-between items-center mb-4">
+                  <h2 className="text-xl font-bold text-green-400">concept performance</h2>
+                  {untaggedBounties.length > 0 && (
+                    <div className="flex gap-2">
+                      <span className="px-3 py-1 bg-yellow-900 text-yellow-300 rounded text-sm">
+                        {untaggedBounties.length} untagged bounties
+                      </span>
+                      <button
+                        onClick={() => setShowBountyModal(true)}
+                        className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded text-sm transition-colors"
+                      >
+                        tag bounties
+                      </button>
+                    </div>
+                  )}
                 </div>
-              )}
-
-              {timeOfDayData.length > 0 && (
-                <div className="bg-gray-800 rounded-lg p-6 border border-gray-700">
-                  <h2 className="text-xl font-bold text-green-400 mb-4">best time to post</h2>
-                  <ResponsiveContainer width="100%" height={300}>
-                    <BarChart data={timeOfDayData}>
-                      <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
-                      <XAxis dataKey="hour" stroke="#9ca3af" />
-                      <YAxis stroke="#9ca3af" />
-                      <Tooltip 
-                        contentStyle={{ backgroundColor: '#1f2937', border: '1px solid #374151' }}
-                      />
-                      <Bar dataKey="coins" fill="#f59e0b" />
-                    </BarChart>
-                  </ResponsiveContainer>
-                </div>
-              )}
-            </div>
-
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-8 mb-8">
-              {topUsers.length > 0 && (
-                <div className="bg-gray-800 rounded-lg p-6 border border-gray-700">
-                  <h2 className="text-xl font-bold text-green-400 mb-4">most active users</h2>
-                  <div className="space-y-3">
-                    {topUsers.map((user, i) => (
-                      <div key={i} className="flex items-center justify-between">
-                        <div className="flex items-center gap-3">
-                          <div className="w-8 h-8 rounded-full bg-blue-600 flex items-center justify-center text-white font-bold text-sm">
-                            {i + 1}
-                          </div>
-                          <span className="text-gray-300">{user.name}</span>
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                  {conceptData.map((concept, i) => (
+                    <div key={i} className="bg-gray-900 rounded-lg p-4 border border-gray-700">
+                      <div className="flex items-center gap-2 mb-3">
+                        <span className="text-lg">💡</span>
+                        <h3 className="font-bold text-white truncate">{concept.name}</h3>
+                      </div>
+                      
+                      <div className="space-y-2 text-sm">
+                        <div className="flex justify-between">
+                          <span className="text-gray-400">total income</span>
+                          <span className="text-green-400 font-bold">{concept.clout}¢</span>
                         </div>
-                        <div className="flex items-center gap-2">
-                          <div className="w-32 bg-gray-700 rounded-full h-2">
-                            <div 
-                              className="bg-blue-500 h-2 rounded-full" 
-                              style={{width: `${(user.count / topUsers[0].count) * 100}%`}}
-                            />
+                        
+                        {concept.bountyWindows.length > 0 && (
+                          <div className="border border-gray-700 rounded p-2 space-y-1">
+                            <div className="flex justify-between text-xs">
+                              <span className="text-gray-400">💰 total bounty cost</span>
+                              <span className="text-gray-300">{concept.bountyCost}¢</span>
+                            </div>
+                            <div className="flex justify-between text-xs">
+                              <span className="text-gray-400">📈 24h window earnings</span>
+                              <span className="text-blue-400">{concept.bountyEarnings}¢</span>
+                            </div>
+                            <div className="flex justify-between text-xs font-bold">
+                              <span className="text-gray-400">avg bounty roi</span>
+                              <span className={concept.avgRoi >= 0 ? 'text-green-400' : 'text-red-400'}>
+                                {concept.avgRoi}%
+                              </span>
+                            </div>
+                            <details className="text-xs">
+                              <summary className="cursor-pointer text-blue-400 hover:text-blue-300">
+                                {concept.bountyWindows.length} bounty window{concept.bountyWindows.length > 1 ? 's' : ''}
+                              </summary>
+                              <div className="mt-2 space-y-1 pl-2">
+                                {concept.bountyWindows.map((window, wi) => (
+                                  <div key={wi} className="flex justify-between text-gray-500">
+                                    <span>{window.date.slice(0, 6)}: {window.amount}¢</span>
+                                    <span className={window.roi >= 0 ? 'text-green-500' : 'text-red-500'}>
+                                      +{window.earned}¢ ({window.roi}%)
+                                    </span>
+                                  </div>
+                                ))}
+                              </div>
+                            </details>
                           </div>
-                          <span className="text-blue-400 font-bold w-8 text-right">{user.count}</span>
+                        )}
+                        
+                        <div className="border-t border-gray-700 pt-2 mt-2">
+                          <div className="flex justify-between">
+                            <span className="text-gray-400">net income</span>
+                            <span className={`font-bold ${concept.netIncome >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                              {concept.netIncome > 0 ? '+' : ''}{concept.netIncome}¢
+                            </span>
+                          </div>
+                        </div>
+                        
+                        <div className="flex justify-between">
+                          <span className="text-gray-400">👥 uses</span>
+                          <span className="text-white">{concept.uses}</span>
+                        </div>
+                        
+                        <div className="flex gap-2">
+                          <span className="px-2 py-1 bg-green-900 text-green-300 rounded text-xs">
+                            {concept.paidUses} paid
+                          </span>
+                          <span className="px-2 py-1 bg-gray-700 text-gray-300 rounded text-xs">
+                            {concept.freeUses} free
+                          </span>
+                        </div>
+                        
+                        <div className="flex justify-between">
+                          <span className="text-gray-400">📊 avg/use</span>
+                          <span className="text-blue-400">{concept.avgPerUse}¢</span>
+                        </div>
+                        
+                        <div className="mt-3">
+                          <div className={`w-full py-1 rounded text-center text-xs font-bold ${
+                            concept.profitable ? 'bg-green-600 text-white' : 'bg-red-600 text-white'
+                          }`}>
+                            {concept.profitable ? 'profitable' : `loss: ${concept.netIncome}¢`}
+                          </div>
                         </div>
                       </div>
-                    ))}
-                  </div>
+                    </div>
+                  ))}
                 </div>
-              )}
-
-              {topValueUsers.length > 0 && (
-                <div className="bg-gray-800 rounded-lg p-6 border border-gray-700">
-                  <h2 className="text-xl font-bold text-green-400 mb-4">highest value users</h2>
-                  <div className="space-y-3">
-                    {topValueUsers.map((user, i) => (
-                      <div key={i} className="flex items-center justify-between">
-                        <div className="flex items-center gap-3">
-                          <div className="w-8 h-8 rounded-full bg-purple-600 flex items-center justify-center text-white font-bold text-sm">
-                            {i + 1}
-                          </div>
-                          <span className="text-gray-300">{user.name}</span>
-                        </div>
-                        <div className="flex items-center gap-2">
-                          <div className="w-32 bg-gray-700 rounded-full h-2">
-                            <div 
-                              className="bg-purple-500 h-2 rounded-full" 
-                              style={{width: `${(user.coins / topValueUsers[0].coins) * 100}%`}}
-                            />
-                          </div>
-                          <span className="text-purple-400 font-bold w-12 text-right">{user.coins}¢</span>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </div>
-
-            <div className="bg-gray-800 rounded-lg p-6 border border-gray-700 mb-8">
-              <h2 className="text-xl font-bold text-green-400 mb-4">action breakdown</h2>
-              <div className="flex justify-center">
-                <ResponsiveContainer width="100%" height={300}>
-                  <PieChart>
-                    <Pie
-                      data={actionData}
-                      cx="50%"
-                      cy="50%"
-                      labelLine={false}
-                      label={({ name, percent }) => `${name} ${(percent * 100).toFixed(0)}%`}
-                      outerRadius={100}
-                      fill="#8884d8"
-                      dataKey="value"
-                    >
-                      {actionData.map((entry, index) => (
-                        <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
-                      ))}
-                    </Pie>
-                    <Tooltip 
-                      contentStyle={{ backgroundColor: '#1f2937', border: '1px solid #374151' }}
-                    />
-                  </PieChart>
-                </ResponsiveContainer>
               </div>
-            </div>
+            )}
+
+            {activeTab === 'analytics' && (
+              <>
+                <div className="bg-gray-800 rounded-lg p-6 mb-8 border border-gray-700">
+                  <h2 className="text-xl font-bold text-green-400 mb-4">cumulative clout flow</h2>
+                  <ResponsiveContainer width="100%" height={300}>
+                    <LineChart data={cloutFlow}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
+                      <XAxis dataKey="label" stroke="#9ca3af" />
+                      <YAxis stroke="#9ca3af" />
+                      <Tooltip 
+                        contentStyle={{ backgroundColor: '#1f2937', border: '1px solid #374151' }}
+                        labelStyle={{ color: '#9ca3af' }}
+                      />
+                      <Line type="monotone" dataKey="total" stroke="#10b981" strokeWidth={2} dot={false} />
+                      <Line type="monotone" dataKey="clout" stroke="#3b82f6" strokeWidth={1} dot={false} />
+                    </LineChart>
+                  </ResponsiveContainer>
+                </div>
+
+                {timeOfDayData.length > 0 && (
+                  <div className="bg-gray-800 rounded-lg p-6 border border-gray-700 mb-8">
+                    <h2 className="text-xl font-bold text-green-400 mb-4">best time to post</h2>
+                    <ResponsiveContainer width="100%" height={300}>
+                      <BarChart data={timeOfDayData}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
+                        <XAxis dataKey="hour" stroke="#9ca3af" />
+                        <YAxis stroke="#9ca3af" />
+                        <Tooltip 
+                          contentStyle={{ backgroundColor: '#1f2937', border: '1px solid #374151' }}
+                        />
+                        <Bar dataKey="clout" fill="#f59e0b" />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                )}
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-8 mb-8">
+                  {topUsers.length > 0 && (
+                    <div className="bg-gray-800 rounded-lg p-6 border border-gray-700">
+                      <h2 className="text-xl font-bold text-green-400 mb-4">most active users</h2>
+                      <div className="space-y-3">
+                        {topUsers.map((user, i) => (
+                          <div key={i} className="flex items-center justify-between">
+                            <div className="flex items-center gap-3">
+                              <div className="w-8 h-8 rounded-full bg-blue-600 flex items-center justify-center text-white font-bold text-sm">
+                                {i + 1}
+                              </div>
+                              <span className="text-gray-300">{user.name}</span>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <div className="w-32 bg-gray-700 rounded-full h-2">
+                                <div 
+                                  className="bg-blue-500 h-2 rounded-full" 
+                                  style={{width: `${(user.count / topUsers[0].count) * 100}%`}}
+                                />
+                              </div>
+                              <span className="text-blue-400 font-bold w-8 text-right">{user.count}</span>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {topValueUsers.length > 0 && (
+                    <div className="bg-gray-800 rounded-lg p-6 border border-gray-700">
+                      <h2 className="text-xl font-bold text-green-400 mb-4">highest value users</h2>
+                      <div className="space-y-3">
+                        {topValueUsers.map((user, i) => (
+                          <div key={i} className="flex items-center justify-between">
+                            <div className="flex items-center gap-3">
+                              <div className="w-8 h-8 rounded-full bg-purple-600 flex items-center justify-center text-white font-bold text-sm">
+                                {i + 1}
+                              </div>
+                              <span className="text-gray-300">{user.name}</span>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <div className="w-32 bg-gray-700 rounded-full h-2">
+                                <div 
+                                  className="bg-purple-500 h-2 rounded-full" 
+                                  style={{width: `${(user.clout / topValueUsers[0].clout) * 100}%`}}
+                                />
+                              </div>
+                              <span className="text-purple-400 font-bold w-12 text-right">{user.clout}¢</span>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                <div className="bg-gray-800 rounded-lg p-6 border border-gray-700 mb-8">
+                  <h2 className="text-xl font-bold text-green-400 mb-4">action breakdown</h2>
+                  <div className="flex justify-center">
+                    <ResponsiveContainer width="100%" height={300}>
+                      <PieChart>
+                        <Pie
+                          data={actionData}
+                          cx="50%"
+                          cy="50%"
+                          labelLine={false}
+                          label={({ name, percent }) => `${name} ${(percent * 100).toFixed(0)}%`}
+                          outerRadius={100}
+                          fill="#8884d8"
+                          dataKey="value"
+                        >
+                          {actionData.map((entry, index) => (
+                            <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
+                          ))}
+                        </Pie>
+                        <Tooltip 
+                          contentStyle={{ backgroundColor: '#1f2937', border: '1px solid #374151' }}
+                        />
+                      </PieChart>
+                    </ResponsiveContainer>
+                  </div>
+                </div>
+              </>
+            )}
 
             <div className="text-center space-x-4">
               <button
@@ -394,6 +630,84 @@ export default function ReceiptAnalytics() {
               </button>
             </div>
           </>
+        )}
+
+        {showBountyModal && (
+          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+            <div className="bg-gray-800 rounded-lg p-6 max-w-2xl w-full mx-4 border border-gray-700 max-h-[80vh] overflow-y-auto">
+              <h3 className="text-xl font-bold text-green-400 mb-4">tag bounties</h3>
+              
+              {untaggedBounties.length === 0 ? (
+                <div className="text-gray-400 text-center py-8">
+                  no untagged bounties! all set.
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  <p className="text-gray-400 text-sm">
+                    select a bounty and assign it to a concept
+                  </p>
+                  
+                  {untaggedBounties.map((bounty, i) => (
+                    <div 
+                      key={i}
+                      onClick={() => setSelectedBounty({...bounty, index: i})}
+                      className={`p-4 rounded border cursor-pointer transition-colors ${
+                        selectedBounty?.index === i 
+                          ? 'border-blue-500 bg-gray-900' 
+                          : 'border-gray-700 bg-gray-800 hover:border-gray-600'
+                      }`}
+                    >
+                      <div className="flex justify-between items-center">
+                        <div>
+                          <div className="text-red-400 font-bold text-lg">-{bounty.clout}¢</div>
+                          <div className="text-gray-500 text-sm">{bounty.date}</div>
+                        </div>
+                        {selectedBounty?.index === i && (
+                          <div className="text-blue-400">✓ selected</div>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                  
+                  {selectedBounty && (
+                    <div className="pt-4 border-t border-gray-700">
+                      <label className="block text-gray-400 text-sm mb-2">assign to concept</label>
+                      <select
+                        value={selectedConcept}
+                        onChange={(e) => setSelectedConcept(e.target.value)}
+                        className="w-full bg-gray-900 text-white border border-gray-700 rounded px-3 py-2 mb-4"
+                      >
+                        <option value="">select a concept</option>
+                        {conceptData.map((c, i) => (
+                          <option key={i} value={c.name}>{c.name}</option>
+                        ))}
+                      </select>
+                      
+                      <div className="flex gap-2">
+                        <button
+                          onClick={handleAddBounty}
+                          disabled={!selectedConcept}
+                          className="flex-1 px-4 py-2 bg-green-600 hover:bg-green-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white rounded transition-colors"
+                        >
+                          assign bounty
+                        </button>
+                        <button
+                          onClick={() => {
+                            setShowBountyModal(false);
+                            setSelectedConcept('');
+                            setSelectedBounty(null);
+                          }}
+                          className="px-4 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded transition-colors"
+                        >
+                          close
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
         )}
       </div>
     </div>
