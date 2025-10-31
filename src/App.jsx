@@ -1,9 +1,64 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, createContext, useContext } from 'react';
 import { BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
+import { 
+  createUserWithEmailAndPassword, 
+  signInWithEmailAndPassword, 
+  signOut, 
+  onAuthStateChanged 
+} from 'firebase/auth';
+import { 
+  doc, 
+  setDoc, 
+  getDoc, 
+  updateDoc 
+} from 'firebase/firestore';
+import { auth, db } from './firebase';
 
 const COLORS = ['#10b981', '#3b82f6', '#8b5cf6', '#f59e0b', '#ef4444'];
 
-export default function ReceiptAnalytics() {
+// auth context
+const AuthContext = createContext();
+
+function AuthProvider({ children }) {
+  const [user, setUser] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (user) => {
+      setUser(user);
+      setLoading(false);
+    });
+    return unsubscribe;
+  }, []);
+
+  const signup = async (email, password, username) => {
+    const userCredential = await createUserWithEmailAndPassword(auth, email, password);
+    await setDoc(doc(db, 'users', userCredential.user.uid), {
+      username,
+      email,
+      createdAt: new Date().toISOString()
+    });
+    return userCredential;
+  };
+
+  const login = (email, password) => signInWithEmailAndPassword(auth, email, password);
+  const logout = () => signOut(auth);
+
+  return (
+    <AuthContext.Provider value={{ user, loading, signup, login, logout }}>
+      {children}
+    </AuthContext.Provider>
+  );
+}
+
+function useAuth() {
+  return useContext(AuthContext);
+}
+
+// main component
+function ReceiptAnalytics() {
+  const { user, loading: authLoading, signup, login, logout } = useAuth();
+  
   const [receipts, setReceipts] = useState([]);
   const [timeFilter, setTimeFilter] = useState('all');
   const [bounties, setBounties] = useState({});
@@ -12,8 +67,49 @@ export default function ReceiptAnalytics() {
   const [selectedBounty, setSelectedBounty] = useState(null);
   const [selectedConcept, setSelectedConcept] = useState('');
   const [activeTab, setActiveTab] = useState('concepts');
+  const [username, setUsername] = useState('');
+  
+  // auth ui state
+  const [showAuthModal, setShowAuthModal] = useState(false);
+  const [authMode, setAuthMode] = useState('login'); // 'login' or 'signup'
+  const [authEmail, setAuthEmail] = useState('');
+  const [authPassword, setAuthPassword] = useState('');
+  const [authUsername, setAuthUsername] = useState('');
+  const [authError, setAuthError] = useState('');
+  const [showSavePrompt, setShowSavePrompt] = useState(false);
 
+  // load data from localStorage or firestore
   useEffect(() => {
+    if (authLoading) return;
+
+    if (user) {
+      // logged in - load from firestore
+      loadFromFirestore();
+      loadUsername();
+    } else {
+      // not logged in - clear localStorage on refresh and start fresh
+      localStorage.removeItem('receipt_data');
+      localStorage.removeItem('bounty_data');
+      localStorage.removeItem('untagged_bounties');
+      setReceipts([]);
+      setBounties({});
+      setUntaggedBounties([]);
+      setUsername('');
+    }
+  }, [user, authLoading]);
+
+  // check if we should show save prompt
+  useEffect(() => {
+    if (!user && receipts.length > 0) {
+      setShowSavePrompt(true);
+    } else {
+      setShowSavePrompt(false);
+    }
+  }, [user, receipts.length]);
+
+  const loadFromLocalStorage = () => {
+    // this function is now unused - keeping for reference but localStorage
+    // is cleared on refresh for non-authenticated users
     const stored = localStorage.getItem('receipt_data');
     if (stored) {
       try {
@@ -41,42 +137,213 @@ export default function ReceiptAnalytics() {
         console.error('failed to parse untagged bounties:', e);
       }
     }
-  }, []);
+  };
+
+  const loadUsername = async () => {
+    if (!user) return;
+    
+    try {
+      const userDocRef = doc(db, 'users', user.uid);
+      const userDocSnap = await getDoc(userDocRef);
+      
+      if (userDocSnap.exists()) {
+        setUsername(userDocSnap.data().username || '');
+      }
+    } catch (e) {
+      console.error('failed to load username:', e);
+    }
+  };
+
+  const loadFromFirestore = async () => {
+    if (!user) return;
+    
+    try {
+      const docRef = doc(db, 'userData', user.uid);
+      const docSnap = await getDoc(docRef);
+      
+      if (docSnap.exists()) {
+        const data = docSnap.data();
+        setReceipts(data.receipts || []);
+        setBounties(data.bounties || {});
+        setUntaggedBounties(data.untaggedBounties || []);
+      } else {
+        // first time login - migrate localStorage data if exists
+        const localReceipts = localStorage.getItem('receipt_data');
+        const localBounties = localStorage.getItem('bounty_data');
+        const localUntagged = localStorage.getItem('untagged_bounties');
+        
+        if (localReceipts || localBounties || localUntagged) {
+          const receiptsData = localReceipts ? JSON.parse(localReceipts) : [];
+          const bountiesData = localBounties ? JSON.parse(localBounties) : {};
+          const untaggedData = localUntagged ? JSON.parse(localUntagged) : [];
+          
+          await setDoc(docRef, {
+            receipts: receiptsData,
+            bounties: bountiesData,
+            untaggedBounties: untaggedData,
+            lastUpdated: new Date().toISOString()
+          });
+          
+          setReceipts(receiptsData);
+          setBounties(bountiesData);
+          setUntaggedBounties(untaggedData);
+          
+          // clear localStorage after migration
+          localStorage.removeItem('receipt_data');
+          localStorage.removeItem('bounty_data');
+          localStorage.removeItem('untagged_bounties');
+        }
+      }
+    } catch (e) {
+      console.error('failed to load from firestore:', e);
+    }
+  };
+
+  const saveToStorage = async (newReceipts, newBounties, newUntagged) => {
+    if (user) {
+      // logged in - save to firestore only, never localStorage
+      try {
+        const docRef = doc(db, 'userData', user.uid);
+        await updateDoc(docRef, {
+          receipts: newReceipts,
+          bounties: newBounties,
+          untaggedBounties: newUntagged,
+          lastUpdated: new Date().toISOString()
+        });
+      } catch (e) {
+        // if doc doesn't exist, create it
+        try {
+          await setDoc(doc(db, 'userData', user.uid), {
+            receipts: newReceipts,
+            bounties: newBounties,
+            untaggedBounties: newUntagged,
+            lastUpdated: new Date().toISOString()
+          });
+        } catch (e2) {
+          console.error('failed to save to firestore:', e2);
+        }
+      }
+    } else {
+      // not logged in - save to localStorage temporarily (will be cleared on refresh)
+      localStorage.setItem('receipt_data', JSON.stringify(newReceipts));
+      localStorage.setItem('bounty_data', JSON.stringify(newBounties));
+      localStorage.setItem('untagged_bounties', JSON.stringify(newUntagged));
+    }
+  };
+
+  const handleAuth = async (e) => {
+    e.preventDefault();
+    setAuthError('');
+    
+    try {
+      if (authMode === 'signup') {
+        if (!authUsername.trim()) {
+          setAuthError('simcluster username required');
+          return;
+        }
+        await signup(authEmail, authPassword, authUsername);
+      } else {
+        await login(authEmail, authPassword);
+      }
+      setShowAuthModal(false);
+      setAuthEmail('');
+      setAuthPassword('');
+      setAuthUsername('');
+    } catch (e) {
+      setAuthError(e.message);
+    }
+  };
+
+  const handleLogout = async () => {
+    try {
+      await logout();
+      setReceipts([]);
+      setBounties({});
+      setUntaggedBounties([]);
+    } catch (e) {
+      console.error('logout failed:', e);
+    }
+  };
 
   const handlePaste = async () => {
     try {
       const text = await navigator.clipboard.readText();
       const parsed = JSON.parse(text);
       
+      let newReceipts = [...receipts];
+      let newUntagged = [...untaggedBounties];
+      let addedCount = 0;
+      let addedBounties = 0;
+      
       if (parsed.receipts && Array.isArray(parsed.receipts)) {
-        setReceipts(parsed.receipts);
-        localStorage.setItem('receipt_data', JSON.stringify(parsed.receipts));
+        // dedupe by date field (timestamp)
+        const existingDates = new Set(receipts.map(r => r.date));
+        
+        parsed.receipts.forEach(receipt => {
+          if (!existingDates.has(receipt.date)) {
+            newReceipts.push(receipt);
+            existingDates.add(receipt.date);
+            addedCount++;
+          }
+        });
         
         if (parsed.bounties && parsed.bounties.length > 0) {
-          setUntaggedBounties(parsed.bounties);
-          localStorage.setItem('untagged_bounties', JSON.stringify(parsed.bounties));
-          alert(`${parsed.receipts.length} receipts loaded. ${parsed.bounties.length} bounties need to be tagged.`);
+          // dedupe bounties by date too
+          const existingBountyDates = new Set(untaggedBounties.map(b => b.date));
+          
+          parsed.bounties.forEach(bounty => {
+            if (!existingBountyDates.has(bounty.date)) {
+              newUntagged.push(bounty);
+              existingBountyDates.add(bounty.date);
+              addedBounties++;
+            }
+          });
+        }
+        
+        setReceipts(newReceipts);
+        setUntaggedBounties(newUntagged);
+        
+        if (addedCount === 0 && addedBounties === 0) {
+          alert('no new data found - all receipts already loaded');
+        } else {
+          alert(`added ${addedCount} new receipts. ${addedBounties > 0 ? `${addedBounties} new bounties need tagging.` : ''}`);
         }
       } else if (Array.isArray(parsed)) {
-        setReceipts(parsed);
-        localStorage.setItem('receipt_data', JSON.stringify(parsed));
+        // legacy format - array of receipts
+        const existingDates = new Set(receipts.map(r => r.date));
+        
+        parsed.forEach(receipt => {
+          if (!existingDates.has(receipt.date)) {
+            newReceipts.push(receipt);
+            existingDates.add(receipt.date);
+            addedCount++;
+          }
+        });
+        
+        setReceipts(newReceipts);
+        
+        if (addedCount === 0) {
+          alert('no new data found - all receipts already loaded');
+        } else {
+          alert(`added ${addedCount} new receipts`);
+        }
       }
+      
+      await saveToStorage(newReceipts, bounties, newUntagged);
     } catch (e) {
       console.error(e);
       alert('failed to paste - make sure you copied valid receipt data');
     }
   };
 
-  const handleClear = () => {
-    localStorage.removeItem('receipt_data');
-    localStorage.removeItem('bounty_data');
-    localStorage.removeItem('untagged_bounties');
+  const handleClear = async () => {
     setReceipts([]);
     setBounties({});
     setUntaggedBounties([]);
+    await saveToStorage([], {}, []);
   };
 
-  const handleAddBounty = () => {
+  const handleAddBounty = async () => {
     if (!selectedConcept || !selectedBounty) return;
     
     let conceptBounties = bounties[selectedConcept] || [];
@@ -94,11 +361,11 @@ export default function ReceiptAnalytics() {
       [selectedConcept]: conceptBounties
     };
     setBounties(newBounties);
-    localStorage.setItem('bounty_data', JSON.stringify(newBounties));
     
     const remaining = untaggedBounties.filter((_, i) => i !== selectedBounty.index);
     setUntaggedBounties(remaining);
-    localStorage.setItem('untagged_bounties', JSON.stringify(remaining));
+    
+    await saveToStorage(receipts, newBounties, remaining);
     
     setShowBountyModal(false);
     setSelectedConcept('');
@@ -290,11 +557,48 @@ export default function ReceiptAnalytics() {
       return acc;
     }, []);
 
+  if (authLoading) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-gray-900 via-green-900 to-gray-900 flex items-center justify-center">
+        <div className="text-green-400 text-xl">loading...</div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-900 via-green-900 to-gray-900 p-8">
       <div className="max-w-7xl mx-auto">
         <div className="mb-8">
-          <h1 className="text-4xl font-bold text-green-400 mb-2">receipt analytics</h1>
+          <div className="flex justify-between items-center mb-2">
+            <div>
+              <h1 className="text-4xl font-bold text-green-400 mb-1">receipt analytics</h1>
+              {user && username && (
+                <p className="text-2xl text-gray-300">
+                  welcome <span className="text-green-300 font-semibold">{username}</span>
+                </p>
+              )}
+            </div>
+            <div className="flex gap-2">
+              {user ? (
+                <button
+                  onClick={handleLogout}
+                  className="px-4 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded transition-colors"
+                >
+                  logout
+                </button>
+              ) : (
+                <button
+                  onClick={() => {
+                    setAuthMode('login');
+                    setShowAuthModal(true);
+                  }}
+                  className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded transition-colors"
+                >
+                  login
+                </button>
+              )}
+            </div>
+          </div>
           <div className="flex items-center gap-4 flex-wrap">
             <p className="text-gray-400">
               {receipts.length > 0 
@@ -324,6 +628,24 @@ export default function ReceiptAnalytics() {
             )}
           </div>
         </div>
+
+        {showSavePrompt && (
+          <div className="bg-yellow-900 border border-yellow-700 rounded-lg p-4 mb-6 flex justify-between items-center">
+            <div>
+              <p className="text-yellow-300 font-bold">save your data</p>
+              <p className="text-yellow-200 text-sm">sign up to sync your receipts across devices</p>
+            </div>
+            <button
+              onClick={() => {
+                setAuthMode('signup');
+                setShowAuthModal(true);
+              }}
+              className="px-6 py-2 bg-yellow-600 hover:bg-yellow-700 text-white rounded transition-colors"
+            >
+              sign up
+            </button>
+          </div>
+        )}
 
         {receipts.length === 0 && (
           <div className="bg-gray-800 rounded-lg p-12 border border-gray-700">
@@ -679,6 +1001,110 @@ export default function ReceiptAnalytics() {
           </>
         )}
 
+        {/* auth modal */}
+        {showAuthModal && (
+          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+            <div className="bg-gray-800 rounded-lg p-6 max-w-md w-full mx-4 border border-gray-700">
+              <h3 className="text-xl font-bold text-green-400 mb-4">
+                {authMode === 'signup' ? 'create account' : 'login'}
+              </h3>
+              
+              <form onSubmit={handleAuth} className="space-y-4">
+                {authMode === 'signup' && (
+                  <div>
+                    <label className="block text-gray-400 text-sm mb-1">simcluster username</label>
+                    <input
+                      type="text"
+                      value={authUsername}
+                      onChange={(e) => setAuthUsername(e.target.value)}
+                      className="w-full bg-gray-900 text-white border border-gray-700 rounded px-3 py-2"
+                      placeholder="your simcluster username"
+                      required
+                    />
+                  </div>
+                )}
+                
+                <div>
+                  <label className="block text-gray-400 text-sm mb-1">email</label>
+                  <input
+                    type="email"
+                    value={authEmail}
+                    onChange={(e) => setAuthEmail(e.target.value)}
+                    className="w-full bg-gray-900 text-white border border-gray-700 rounded px-3 py-2"
+                    placeholder="you@example.com"
+                    required
+                  />
+                </div>
+                
+                <div>
+                  <label className="block text-gray-400 text-sm mb-1">password</label>
+                  <input
+                    type="password"
+                    value={authPassword}
+                    onChange={(e) => setAuthPassword(e.target.value)}
+                    className="w-full bg-gray-900 text-white border border-gray-700 rounded px-3 py-2"
+                    placeholder="••••••••"
+                    required
+                  />
+                </div>
+                
+                {authError && (
+                  <p className="text-red-400 text-sm">{authError}</p>
+                )}
+                
+                <div className="flex gap-2">
+                  <button
+                    type="submit"
+                    className="flex-1 px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded transition-colors"
+                  >
+                    {authMode === 'signup' ? 'sign up' : 'login'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowAuthModal(false);
+                      setAuthError('');
+                      setAuthEmail('');
+                      setAuthPassword('');
+                      setAuthUsername('');
+                    }}
+                    className="px-4 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded transition-colors"
+                  >
+                    cancel
+                  </button>
+                </div>
+                
+                <div className="text-center text-sm text-gray-400">
+                  {authMode === 'signup' ? (
+                    <>
+                      already have an account?{' '}
+                      <button
+                        type="button"
+                        onClick={() => setAuthMode('login')}
+                        className="text-blue-400 hover:text-blue-300"
+                      >
+                        login
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      don't have an account?{' '}
+                      <button
+                        type="button"
+                        onClick={() => setAuthMode('signup')}
+                        className="text-blue-400 hover:text-blue-300"
+                      >
+                        sign up
+                      </button>
+                    </>
+                  )}
+                </div>
+              </form>
+            </div>
+          </div>
+        )}
+
+        {/* bounty modal */}
         {showBountyModal && (
           <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
             <div className="bg-gray-800 rounded-lg p-6 max-w-2xl w-full mx-4 border border-gray-700 max-h-[80vh] overflow-y-auto">
@@ -758,5 +1184,13 @@ export default function ReceiptAnalytics() {
         )}
       </div>
     </div>
+  );
+}
+
+export default function App() {
+  return (
+    <AuthProvider>
+      <ReceiptAnalytics />
+    </AuthProvider>
   );
 }
