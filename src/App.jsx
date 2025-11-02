@@ -81,6 +81,8 @@ function ReceiptAnalytics() {
   const [activeTab, setActiveTab] = useState('concepts');
   const [username, setUsername] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [deleteProgress, setDeleteProgress] = useState({ current: 0, total: 0 });
+  const deleteProgressRef = React.useRef({ current: 0, total: 0 });
   
   // auth ui state
   const [showAuthModal, setShowAuthModal] = useState(false);
@@ -281,7 +283,13 @@ function ReceiptAnalytics() {
     
     const batch = writeBatch(db);
     
-    // group receipts by date
+    // normalize date to just the day part for firestore path
+    const normalizeDateToDay = (dateStr) => {
+      const match = dateStr.match(/^([A-Za-z]+\s+\d+)/);
+      return match ? match[1] : dateStr;
+    };
+    
+    // group receipts by normalized date
     const receiptsByDate = {};
     let skippedCount = 0;
     receiptsData.forEach((receipt, index) => {
@@ -290,10 +298,12 @@ function ReceiptAnalytics() {
         skippedCount++;
         return;
       }
-      if (!receiptsByDate[receipt.date]) {
-        receiptsByDate[receipt.date] = [];
+      const normalizedDate = normalizeDateToDay(receipt.date);
+      if (!receiptsByDate[normalizedDate]) {
+        receiptsByDate[normalizedDate] = [];
       }
-      receiptsByDate[receipt.date].push({ ...receipt, originalIndex: index });
+      // keep full timestamp in receipt
+      receiptsByDate[normalizedDate].push({ ...receipt, originalIndex: index });
     });
     
     if (skippedCount > 0) {
@@ -301,13 +311,13 @@ function ReceiptAnalytics() {
     }
     
     // save each date's receipts to its own subcollection
-    Object.entries(receiptsByDate).forEach(([date, dateReceipts]) => {
-      const dateId = date.replace(/[^a-zA-Z0-9]/g, '_');
+    Object.entries(receiptsByDate).forEach(([normalizedDate, dateReceipts]) => {
+      const dateId = normalizedDate.replace(/[^a-zA-Z0-9]/g, '_');
       
       // create the date document itself so firestore can list it
       const dateDocRef = doc(db, 'users', user.uid, 'receipts_by_date', dateId);
       batch.set(dateDocRef, { 
-        date: date,
+        date: normalizedDate,
         itemCount: dateReceipts.length,
         lastUpdated: new Date().toISOString()
       });
@@ -337,39 +347,55 @@ function ReceiptAnalytics() {
       try {
         const batch = writeBatch(db);
         
-        // group receipts by date
+        // normalize date to just the day part for firestore path (but keep full timestamp in receipt)
+        const normalizeDateToDay = (dateStr) => {
+          // "Oct 18 1:15 PM" -> "Oct 18"
+          const match = dateStr.match(/^([A-Za-z]+\s+\d+)/);
+          return match ? match[1] : dateStr;
+        };
+        
+        // group NEW receipts by normalized date (only ones that were just added)
         const receiptsByDate = {};
-        newReceipts.forEach((receipt, index) => {
+        const existingCount = receipts.length;
+        const addedReceipts = newReceipts.slice(existingCount); // only get new ones
+        
+        addedReceipts.forEach((receipt, index) => {
           if (!receipt.date || !receipt.date.trim()) {
             console.error('skipping receipt with missing date during save:', receipt);
             return;
           }
-          if (!receiptsByDate[receipt.date]) {
-            receiptsByDate[receipt.date] = [];
+          const normalizedDate = normalizeDateToDay(receipt.date);
+          if (!receiptsByDate[normalizedDate]) {
+            receiptsByDate[normalizedDate] = [];
           }
-          receiptsByDate[receipt.date].push({ ...receipt, originalIndex: index });
+          // keep the FULL timestamp in the receipt object
+          receiptsByDate[normalizedDate].push({ ...receipt, originalIndex: existingCount + index });
         });
         
-        // save each date's receipts to its own subcollection
-        Object.entries(receiptsByDate).forEach(([date, dateReceipts]) => {
-          const dateId = date.replace(/[^a-zA-Z0-9]/g, '_');
+        // only save NEW receipts to their date subcollections
+        Object.entries(receiptsByDate).forEach(([normalizedDate, dateReceipts]) => {
+          const dateId = normalizedDate.replace(/[^a-zA-Z0-9]/g, '_');
           
-          // create the date document itself so firestore can list it
+          // get existing count for this normalized date
+          const existingForDate = receipts.filter(r => normalizeDateToDay(r.date) === normalizedDate).length;
+          
+          // update date document with new count
           const dateDocRef = doc(db, 'users', user.uid, 'receipts_by_date', dateId);
           batch.set(dateDocRef, { 
-            date: date,
-            itemCount: dateReceipts.length,
+            date: normalizedDate,
+            itemCount: existingForDate + dateReceipts.length,
             lastUpdated: new Date().toISOString()
-          });
+          }, { merge: true });
           
-          // create items subcollection
-          dateReceipts.forEach((receipt, position) => {
+          // append new items starting from existing count
+          dateReceipts.forEach((receipt, idx) => {
+            const position = existingForDate + idx;
             const itemRef = doc(db, 'users', user.uid, 'receipts_by_date', dateId, 'items', position.toString());
-            batch.set(itemRef, receipt);
+            batch.set(itemRef, receipt); // receipt still has full timestamp
           });
         });
         
-        // save metadata
+        // always update metadata (it's small)
         const metadataRef = doc(db, 'users', user.uid, 'metadata', 'settings');
         batch.set(metadataRef, {
           bounties: newBounties,
@@ -426,6 +452,7 @@ function ReceiptAnalytics() {
   };
 
   const handlePaste = async () => {
+    setIsLoading(true);
     try {
       const text = await navigator.clipboard.readText();
       const parsed = JSON.parse(text);
@@ -437,178 +464,158 @@ function ReceiptAnalytics() {
       let skippedCount = 0;
       
       if (parsed.receipts && Array.isArray(parsed.receipts)) {
-        // group existing receipts by date to track positions within each date
+        // track how many receipts we have from each date in their original order
         const existingByDate = {};
         receipts.forEach((receipt) => {
           if (!existingByDate[receipt.date]) {
-            existingByDate[receipt.date] = [];
+            existingByDate[receipt.date] = 0;
           }
-          existingByDate[receipt.date].push(receipt);
+          existingByDate[receipt.date]++;
         });
         
-        // group incoming receipts by date to get their position within that date
-        const incomingByDate = {};
+        // track position within each date as we iterate
+        const incomingPositionByDate = {};
+        
         parsed.receipts.forEach((receipt) => {
           if (!receipt.date || !receipt.date.trim()) {
             console.error('skipping receipt with missing date:', receipt);
             skippedCount++;
             return;
           }
-          if (!incomingByDate[receipt.date]) {
-            incomingByDate[receipt.date] = [];
-          }
-          incomingByDate[receipt.date].push(receipt);
-        });
-        
-        // for each date, check which positions we don't have yet
-        Object.entries(incomingByDate).forEach(([date, incomingDateReceipts]) => {
-          const existingDateReceipts = existingByDate[date] || [];
           
-          incomingDateReceipts.forEach((receipt, positionInDate) => {
-            // do we already have a receipt at this position for this date?
-            if (positionInDate >= existingDateReceipts.length) {
-              // nope, this is a new position for this date
-              newReceipts.push(receipt);
-              existingDateReceipts.push(receipt); // track it so we don't add dupes within this paste
-              addedCount++;
-            }
-            // if positionInDate < existingDateReceipts.length, we already have something at this position - skip it
-          });
+          // initialize position counter for this date if needed
+          if (incomingPositionByDate[receipt.date] === undefined) {
+            incomingPositionByDate[receipt.date] = 0;
+          }
+          
+          const positionInDate = incomingPositionByDate[receipt.date];
+          const existingCount = existingByDate[receipt.date] || 0;
+          
+          // only add if this position doesn't exist yet
+          if (positionInDate >= existingCount) {
+            newReceipts.push(receipt);
+            addedCount++;
+            // update existing count so we don't add dupes within this paste
+            existingByDate[receipt.date] = existingCount + 1;
+          }
+          
+          incomingPositionByDate[receipt.date]++;
         });
         
         if (parsed.bounties && parsed.bounties.length > 0) {
-          // same logic for bounties
           const existingBountiesByDate = {};
           untaggedBounties.forEach((bounty) => {
             if (!existingBountiesByDate[bounty.date]) {
-              existingBountiesByDate[bounty.date] = [];
+              existingBountiesByDate[bounty.date] = 0;
             }
-            existingBountiesByDate[bounty.date].push(bounty);
+            existingBountiesByDate[bounty.date]++;
           });
           
-          const incomingBountiesByDate = {};
+          const incomingBountyPositionByDate = {};
+          
           parsed.bounties.forEach((bounty) => {
             if (!bounty.date || !bounty.date.trim()) {
               console.error('skipping bounty with missing date:', bounty);
               return;
             }
-            if (!incomingBountiesByDate[bounty.date]) {
-              incomingBountiesByDate[bounty.date] = [];
-            }
-            incomingBountiesByDate[bounty.date].push(bounty);
-          });
-          
-          Object.entries(incomingBountiesByDate).forEach(([date, incomingDateBounties]) => {
-            const existingDateBounties = existingBountiesByDate[date] || [];
             
-            incomingDateBounties.forEach((bounty, positionInDate) => {
-              if (positionInDate >= existingDateBounties.length) {
-                newUntagged.push(bounty);
-                existingDateBounties.push(bounty);
-                addedBounties++;
-              }
-            });
+            if (incomingBountyPositionByDate[bounty.date] === undefined) {
+              incomingBountyPositionByDate[bounty.date] = 0;
+            }
+            
+            const positionInDate = incomingBountyPositionByDate[bounty.date];
+            const existingCount = existingBountiesByDate[bounty.date] || 0;
+            
+            if (positionInDate >= existingCount) {
+              newUntagged.push(bounty);
+              addedBounties++;
+              existingBountiesByDate[bounty.date] = existingCount + 1;
+            }
+            
+            incomingBountyPositionByDate[bounty.date]++;
           });
         }
-        
-        setReceipts(newReceipts);
-        setUntaggedBounties(newUntagged);
         
         if (addedCount === 0 && addedBounties === 0) {
           alert(`no new data found - all receipts already loaded${skippedCount > 0 ? ` (${skippedCount} skipped due to missing dates)` : ''}`);
-        } else {
-          alert(`added ${addedCount} new receipts${skippedCount > 0 ? ` (${skippedCount} skipped due to missing dates)` : ''}. ${addedBounties > 0 ? `${addedBounties} new bounties need tagging.` : ''}`);
+          return;
         }
+        
+        // update ui immediately before async save
+        setReceipts(newReceipts);
+        setUntaggedBounties(newUntagged);
+        
+        // save in background
+        saveToStorage(newReceipts, bounties, newUntagged).then(() => {
+          console.log('save complete');
+        });
+        
+        alert(`added ${addedCount} new receipts${skippedCount > 0 ? ` (${skippedCount} skipped due to missing dates)` : ''}. ${addedBounties > 0 ? `${addedBounties} new bounties need tagging.` : ''}`);
+        return;
       } else if (Array.isArray(parsed)) {
         const existingByDate = {};
         receipts.forEach((receipt) => {
           if (!existingByDate[receipt.date]) {
-            existingByDate[receipt.date] = [];
+            existingByDate[receipt.date] = 0;
           }
-          existingByDate[receipt.date].push(receipt);
+          existingByDate[receipt.date]++;
         });
         
-        const incomingByDate = {};
+        const incomingPositionByDate = {};
+        
         parsed.forEach((receipt) => {
           if (!receipt.date || !receipt.date.trim()) {
             console.error('skipping receipt with missing date:', receipt);
             skippedCount++;
             return;
           }
-          if (!incomingByDate[receipt.date]) {
-            incomingByDate[receipt.date] = [];
-          }
-          incomingByDate[receipt.date].push(receipt);
-        });
-        
-        Object.entries(incomingByDate).forEach(([date, incomingDateReceipts]) => {
-          const existingDateReceipts = existingByDate[date] || [];
           
-          incomingDateReceipts.forEach((receipt, positionInDate) => {
-            if (positionInDate >= existingDateReceipts.length) {
-              newReceipts.push(receipt);
-              existingDateReceipts.push(receipt);
-              addedCount++;
-            }
-          });
+          if (incomingPositionByDate[receipt.date] === undefined) {
+            incomingPositionByDate[receipt.date] = 0;
+          }
+          
+          const positionInDate = incomingPositionByDate[receipt.date];
+          const existingCount = existingByDate[receipt.date] || 0;
+          
+          if (positionInDate >= existingCount) {
+            newReceipts.push(receipt);
+            addedCount++;
+            existingByDate[receipt.date] = existingCount + 1;
+          }
+          
+          incomingPositionByDate[receipt.date]++;
         });
-        
-        setReceipts(newReceipts);
         
         if (addedCount === 0) {
           alert(`no new data found - all receipts already loaded${skippedCount > 0 ? ` (${skippedCount} skipped due to missing dates)` : ''}`);
-        } else {
-          alert(`added ${addedCount} new receipts${skippedCount > 0 ? ` (${skippedCount} skipped due to missing dates)` : ''}`);
+          setIsLoading(false);
+          return;
         }
+        
+        // update ui immediately
+        setReceipts(newReceipts);
+        
+        // save in background
+        saveToStorage(newReceipts, bounties, newUntagged).then(() => {
+          console.log('save complete');
+        });
+        
+        alert(`added ${addedCount} new receipts${skippedCount > 0 ? ` (${skippedCount} skipped due to missing dates)` : ''}`);
       }
-      
-      await saveToStorage(newReceipts, bounties, newUntagged);
     } catch (e) {
       console.error(e);
       alert('failed to paste - make sure you copied valid receipt data');
+    } finally {
+      setIsLoading(false);
     }
   };
 
   const handleClear = async () => {
     if (!confirm('are you sure? this will delete ALL your receipts')) return;
     
-    setIsLoading(true);
+    console.log('clear started');
     
-    if (user) {
-      try {
-        // delete all date subcollections
-        const receiptsByDateRef = collection(db, 'users', user.uid, 'receipts_by_date');
-        const datesSnap = await getDocs(receiptsByDateRef);
-        
-        const batch = writeBatch(db);
-        
-        // for each date, delete all its items
-        for (const dateDoc of datesSnap.docs) {
-          const itemsRef = collection(db, 'users', user.uid, 'receipts_by_date', dateDoc.id, 'items');
-          const itemsSnap = await getDocs(itemsRef);
-          
-          itemsSnap.forEach((itemDoc) => {
-            batch.delete(itemDoc.ref);
-          });
-          
-          // delete the date document itself (after items are deleted)
-          batch.delete(dateDoc.ref);
-        }
-        
-        // clear metadata
-        const metadataRef = doc(db, 'users', user.uid, 'metadata', 'settings');
-        batch.set(metadataRef, {
-          bounties: {},
-          untaggedBounties: [],
-          lastUpdated: new Date().toISOString()
-        });
-        
-        await batch.commit();
-      } catch (e) {
-        console.error('failed to clear firestore:', e);
-      }
-    }
-    
+    // clear ui immediately
     setReceipts([]);
     setBounties({});
     setUntaggedBounties([]);
@@ -617,7 +624,107 @@ function ReceiptAnalytics() {
     localStorage.removeItem('bounty_data');
     localStorage.removeItem('untagged_bounties');
     
-    setIsLoading(false);
+    console.log('local storage cleared, ui cleared');
+    
+    // delete from firestore in background if logged in
+    if (user) {
+      console.log('user logged in, starting firestore deletion');
+      setIsLoading(true);
+      
+      // do the deletion in background
+      (async () => {
+        try {
+          console.log('fetching date documents...');
+          // delete all date subcollections
+          const receiptsByDateRef = collection(db, 'users', user.uid, 'receipts_by_date');
+          const datesSnap = await getDocs(receiptsByDateRef);
+          
+          console.log(`found ${datesSnap.docs.length} date documents`);
+          
+          const totalDates = datesSnap.docs.length;
+          deleteProgressRef.current = { current: 0, total: totalDates };
+          setDeleteProgress({ current: 0, total: totalDates });
+          
+          // update progress display every 100ms
+          const progressInterval = setInterval(() => {
+            setDeleteProgress({ ...deleteProgressRef.current });
+          }, 100);
+          
+          // process dates in parallel chunks of 10
+          const PARALLEL_CHUNK_SIZE = 10;
+          const dateChunks = [];
+          for (let i = 0; i < datesSnap.docs.length; i += PARALLEL_CHUNK_SIZE) {
+            dateChunks.push(datesSnap.docs.slice(i, i + PARALLEL_CHUNK_SIZE));
+          }
+          
+          console.log(`processing ${dateChunks.length} chunks in parallel`);
+          
+          for (let chunkIndex = 0; chunkIndex < dateChunks.length; chunkIndex++) {
+            const chunk = dateChunks[chunkIndex];
+            console.log(`chunk ${chunkIndex + 1}/${dateChunks.length}: ${chunk.length} dates`);
+            
+            // process this chunk in parallel
+            await Promise.all(chunk.map(async (dateDoc) => {
+              const itemsRef = collection(db, 'users', user.uid, 'receipts_by_date', dateDoc.id, 'items');
+              const itemsSnap = await getDocs(itemsRef);
+              
+              let batch = writeBatch(db);
+              let opCount = 0;
+              
+              for (const itemDoc of itemsSnap.docs) {
+                batch.delete(itemDoc.ref);
+                opCount++;
+                
+                if (opCount >= 499) {
+                  await batch.commit();
+                  batch = writeBatch(db);
+                  opCount = 0;
+                }
+              }
+              
+              batch.delete(dateDoc.ref);
+              opCount++;
+              
+              if (opCount > 0) {
+                await batch.commit();
+              }
+              
+              deleteProgressRef.current.current++;
+            }));
+            
+            console.log(`chunk ${chunkIndex + 1} done`);
+          }
+          
+          clearInterval(progressInterval);
+          setDeleteProgress({ current: totalDates, total: totalDates });
+          
+          console.log('updating metadata');
+          
+          const metaBatch = writeBatch(db);
+          const metadataRef = doc(db, 'users', user.uid, 'metadata', 'settings');
+          metaBatch.set(metadataRef, {
+            bounties: {},
+            untaggedBounties: [],
+            lastUpdated: new Date().toISOString()
+          });
+          
+          await metaBatch.commit();
+          console.log('metadata cleared');
+          
+          console.log('firestore cleared successfully');
+          setDeleteProgress({ current: 0, total: 0 });
+        } catch (e) {
+          console.error('failed to clear firestore:', e);
+          alert('failed to clear data from server: ' + e.message);
+          setDeleteProgress({ current: 0, total: 0 });
+        } finally {
+          console.log('setting loading to false');
+          setIsLoading(false);
+        }
+      })();
+    } else {
+      console.log('no user logged in, skipping firestore deletion');
+    }
   };
 
   const handleAddBounty = async () => {
@@ -680,7 +787,7 @@ function ReceiptAnalytics() {
   const filteredReceipts = timeFilter === '24h' 
     ? receipts.filter(r => {
         const receiptDate = parseReceiptDate(r.date);
-        if (!receiptDate) return true;
+        if (!receiptDate) return false; // exclude if we can't parse the date
         const now = new Date();
         const hoursDiff = (now - receiptDate) / (1000 * 60 * 60);
         return hoursDiff <= 24 && hoursDiff >= 0;
@@ -834,10 +941,30 @@ function ReceiptAnalytics() {
       return acc;
     }, []);
 
-  if (authLoading || isLoading) {
+  if (authLoading || (isLoading && deleteProgress.total === 0)) {
     return (
       <div className="min-h-screen bg-gradient-to-br from-gray-900 via-green-900 to-gray-900 flex items-center justify-center">
         <div className="text-green-400 text-xl">loading...</div>
+      </div>
+    );
+  }
+
+  if (isLoading && deleteProgress.total > 0) {
+    const percentage = Math.round((deleteProgress.current / deleteProgress.total) * 100);
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-gray-900 via-green-900 to-gray-900 flex items-center justify-center">
+        <div className="max-w-md w-full mx-4">
+          <div className="text-green-400 text-xl mb-4 text-center font-mono">
+            deleting {deleteProgress.current}/{deleteProgress.total} dates
+          </div>
+          <div className="w-full bg-gray-800 rounded-full h-4 border border-gray-700 overflow-hidden">
+            <div 
+              className="h-full bg-gradient-to-r from-red-600 to-red-400 transition-all duration-300 ease-out"
+              style={{ width: `${percentage}%` }}
+            />
+          </div>
+          <div className="text-gray-400 text-center mt-2 font-mono">{percentage}%</div>
+        </div>
       </div>
     );
   }
@@ -857,7 +984,7 @@ function ReceiptAnalytics() {
             </div>
             <div className="flex gap-2">
               <a
-                href="https://buy.stripe.com/test_4gM28q8ev0gV6MA8xX5ZC00"
+                href="https://buy.stripe.com/YOUR_PAYMENT_LINK_ID"
                 target="_blank"
                 rel="noopener noreferrer"
                 className="px-4 py-2 bg-green-600/20 hover:bg-green-600/30 border border-green-500/50 hover:border-green-400 text-green-400 rounded transition-all flex items-center gap-2 group"
