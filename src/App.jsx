@@ -646,57 +646,63 @@ function ReceiptAnalytics() {
           setDeleteProgress({ current: 0, total: totalDates });
           
           // update progress display every 100ms
-          const progressInterval = setInterval(() => {
-            setDeleteProgress({ ...deleteProgressRef.current });
+          let progressInterval = setInterval(() => {
+            const current = deleteProgressRef.current;
+            console.log(`progress update: ${current.current}/${current.total}`);
+            setDeleteProgress({ current: current.current, total: current.total });
           }, 100);
           
-          // process dates in parallel chunks of 10
-          const PARALLEL_CHUNK_SIZE = 10;
-          const dateChunks = [];
-          for (let i = 0; i < datesSnap.docs.length; i += PARALLEL_CHUNK_SIZE) {
-            dateChunks.push(datesSnap.docs.slice(i, i + PARALLEL_CHUNK_SIZE));
-          }
-          
-          console.log(`processing ${dateChunks.length} chunks in parallel`);
-          
-          for (let chunkIndex = 0; chunkIndex < dateChunks.length; chunkIndex++) {
-            const chunk = dateChunks[chunkIndex];
-            console.log(`chunk ${chunkIndex + 1}/${dateChunks.length}: ${chunk.length} dates`);
+          try {
+            // process dates in parallel chunks of 10
+            const PARALLEL_CHUNK_SIZE = 10;
+            const dateChunks = [];
+            for (let i = 0; i < datesSnap.docs.length; i += PARALLEL_CHUNK_SIZE) {
+              dateChunks.push(datesSnap.docs.slice(i, i + PARALLEL_CHUNK_SIZE));
+            }
             
-            // process this chunk in parallel
-            await Promise.all(chunk.map(async (dateDoc) => {
-              const itemsRef = collection(db, 'users', user.uid, 'receipts_by_date', dateDoc.id, 'items');
-              const itemsSnap = await getDocs(itemsRef);
+            console.log(`processing ${dateChunks.length} chunks in parallel`);
+            
+            for (let chunkIndex = 0; chunkIndex < dateChunks.length; chunkIndex++) {
+              const chunk = dateChunks[chunkIndex];
+              console.log(`chunk ${chunkIndex + 1}/${dateChunks.length}: ${chunk.length} dates`);
               
-              let batch = writeBatch(db);
-              let opCount = 0;
-              
-              for (const itemDoc of itemsSnap.docs) {
-                batch.delete(itemDoc.ref);
+              // process this chunk in parallel
+              await Promise.all(chunk.map(async (dateDoc) => {
+                const itemsRef = collection(db, 'users', user.uid, 'receipts_by_date', dateDoc.id, 'items');
+                const itemsSnap = await getDocs(itemsRef);
+                
+                let batch = writeBatch(db);
+                let opCount = 0;
+                
+                for (const itemDoc of itemsSnap.docs) {
+                  batch.delete(itemDoc.ref);
+                  opCount++;
+                  
+                  if (opCount >= 499) {
+                    await batch.commit();
+                    batch = writeBatch(db);
+                    opCount = 0;
+                  }
+                }
+                
+                batch.delete(dateDoc.ref);
                 opCount++;
                 
-                if (opCount >= 499) {
+                if (opCount > 0) {
                   await batch.commit();
-                  batch = writeBatch(db);
-                  opCount = 0;
                 }
-              }
+                
+                // update immediately after this date is done
+                deleteProgressRef.current.current++;
+                console.log(`deleted ${dateDoc.id} (${deleteProgressRef.current.current}/${totalDates})`);
+              }));
               
-              batch.delete(dateDoc.ref);
-              opCount++;
-              
-              if (opCount > 0) {
-                await batch.commit();
-              }
-              
-              deleteProgressRef.current.current++;
-            }));
+              console.log(`chunk ${chunkIndex + 1} done`);
+            }
             
-            console.log(`chunk ${chunkIndex + 1} done`);
-          }
-          
-          clearInterval(progressInterval);
-          setDeleteProgress({ current: totalDates, total: totalDates });
+            clearInterval(progressInterval);
+            progressInterval = null;
+            setDeleteProgress({ current: totalDates, total: totalDates });
           
           console.log('updating metadata');
           
@@ -713,6 +719,9 @@ function ReceiptAnalytics() {
           
           console.log('firestore cleared successfully');
           setDeleteProgress({ current: 0, total: 0 });
+        } catch (innerE) {
+          throw innerE;
+        }
         } catch (e) {
           console.error('failed to clear firestore:', e);
           alert('failed to clear data from server: ' + e.message);
@@ -1105,7 +1114,7 @@ function ReceiptAnalytics() {
                       <p className="text-gray-300 mb-2">create a bookmark with this code as the url:</p>
                       <div className="bg-black rounded p-3 overflow-x-auto">
                         <code className="text-green-400 text-xs break-all">
-                          javascript:(function()&#123;const receipts=[];let bounties=[];document.querySelectorAll('div.flex.items-center.px-2').forEach(el=&#62;&#123;const cloutEl=el.querySelector('.text-green-500, .text-red-500, [class*="text-green"], [class*="text-red"]');const clout=cloutEl?parseInt(cloutEl.textContent.replace(/[^\d-]/g,'')):0;const dateEl=el.querySelector('.opacity-60');const date=dateEl?dateEl.textContent.trim():'';const contentEl=el.querySelector('.flex-1.min-w-0');const content=contentEl?contentEl.textContent.trim():'';let user='you';let concept=null;let action='unknown';if(content.includes('You created a new bounty'))&#123;bounties.push(&#123;clout:Math.abs(clout),date&#125;);action='bounty';&#125;else if(content.includes('daily concept bounty'))&#123;action='daily_bounty';&#125;else if(content.includes('daily sign-in bonus'))&#123;action='daily_signin';&#125;else if(content.includes('You generated a new post draft'))&#123;action='draft_cost';&#125;else if(content.includes('You received a tip from'))&#123;const tipMatch=content.match(/tip from\s+(.+?)\s+for/);user=tipMatch?tipMatch[1]:'unknown';action='tip';&#125;else if(content.includes('liked your post')||content.includes('liked your song'))&#123;const likeMatch=content.match(/^(.+?)\s+liked/);user=likeMatch?likeMatch[1]:'unknown';action='like';&#125;else if(content.includes('used your concept'))&#123;const userMatch=content.match(/^(.+?)\s+used your concept/);user=userMatch?userMatch[1]:'unknown';const conceptMatch=content.match(/concept\s+[^\w\s]*(.+?)\s+to\s+(create|generate)/i);concept=conceptMatch?conceptMatch[1].trim():null;action=conceptMatch?conceptMatch[2]:'use';&#125;receipts.push(&#123;user:user.trim(),action,concept,clout,date,raw:content&#125;);&#125;);const data=&#123;receipts,bounties&#125;;navigator.clipboard.writeText(JSON.stringify(data)).then(()=&#62;alert`Copied $&#123;receipts.length&#125; receipts ($&#123;bounties.length&#125; bounties need tagging)! Paste into dashboard.`);&#125;)();
+                          javascript:(function()&#123;const receipts=[];let bounties=[];document.querySelectorAll('div.flex.items-center.px-2').forEach(el=&#62;&#123;const cloutEl=el.querySelector('.text-green-500, .text-red-500, [class*="text-green"], [class*="text-red"]');const clout=cloutEl?parseInt(cloutEl.textContent.replace(/[^\d-]/g,'')):0;const dateEl=el.querySelector('.opacity-60');const date=dateEl?dateEl.textContent.trim():'';const contentEl=el.querySelector('.flex-1.min-w-0');const content=contentEl?contentEl.textContent.trim():'';if(!date||!content)return;let user='you';let concept=null;let action='unknown';if(content.includes('You created a new bounty'))&#123;bounties.push(&#123;clout:Math.abs(clout),date&#125;);action='bounty';&#125;else if(content.includes('daily concept bounty'))&#123;action='daily_bounty';&#125;else if(content.includes('daily sign-in bonus'))&#123;action='daily_signin';&#125;else if(content.includes('You generated a new post draft'))&#123;action='draft_cost';&#125;else if(content.includes('You received a tip from'))&#123;const tipMatch=content.match(/tip from\s+(.+?)\s+for/);user=tipMatch?tipMatch[1]:'unknown';action='tip';&#125;else if(content.includes('You tipped'))&#123;const tipMatch=content.match(/You tipped\s+(.+?)\s+for/);user=tipMatch?tipMatch[1]:'unknown';action='tip_sent';&#125;else if(content.includes('liked your post')||content.includes('liked your song'))&#123;const likeMatch=content.match(/^(.+?)\s+liked/);user=likeMatch?likeMatch[1]:'unknown';action='like';&#125;else if(content.includes('You liked your own'))&#123;action='self_like';&#125;else if(content.includes('listened to your song'))&#123;const listenMatch=content.match(/^(.+?)\s+listened/);user=listenMatch?listenMatch[1]:'unknown';action='listen';&#125;else if(content.includes('replied to your post'))&#123;const replyMatch=content.match(/^(.+?)\s+replied/);user=replyMatch?replyMatch[1]:'unknown';action='reply';&#125;else if(content.includes('used your concept'))&#123;const userMatch=content.match(/^(.+?)\s+used your concept/);user=userMatch?userMatch[1]:'unknown';const conceptMatch=content.match(/concept\s+[^\w\s]*(.+?)\s+to\s+(create|generate)/i);concept=conceptMatch?conceptMatch[1].trim():null;action=conceptMatch?conceptMatch[2]:'use';&#125;receipts.push(&#123;user:user.trim(),action,concept,clout,date,raw:content&#125;);&#125;);const data=&#123;receipts,bounties&#125;;navigator.clipboard.writeText(JSON.stringify(data)).then(()=&#62;alert`Copied $&#123;receipts.length&#125; receipts ($&#123;bounties.length&#125; bounties need tagging)! Paste into dashboard.`);&#125;)();
                         </code>
                       </div>
                     </div>
