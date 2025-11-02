@@ -281,8 +281,6 @@ function ReceiptAnalytics() {
     
     console.log(`migrating ${receiptsData.length} receipts to date-based subcollections...`);
     
-    const batch = writeBatch(db);
-    
     // normalize date to just the day part for firestore path
     const normalizeDateToDay = (dateStr) => {
       const match = dateStr.match(/^([A-Za-z]+\s+\d+)/);
@@ -310,34 +308,66 @@ function ReceiptAnalytics() {
       console.warn(`skipped ${skippedCount} receipts with missing dates during migration`);
     }
     
+    // chunk writes to avoid quota limits
+    const MAX_BATCH_SIZE = 450; // leave some headroom
+    let batch = writeBatch(db);
+    let operationCount = 0;
+    let batchCount = 0;
+    
     // save each date's receipts to its own subcollection
-    Object.entries(receiptsByDate).forEach(([normalizedDate, dateReceipts]) => {
+    for (const [normalizedDate, dateReceipts] of Object.entries(receiptsByDate)) {
       const dateId = normalizedDate.replace(/[^a-zA-Z0-9]/g, '_');
       
-      // create the date document itself so firestore can list it
+      // create the date document itself
       const dateDocRef = doc(db, 'users', user.uid, 'receipts_by_date', dateId);
       batch.set(dateDocRef, { 
         date: normalizedDate,
         itemCount: dateReceipts.length,
         lastUpdated: new Date().toISOString()
       });
+      operationCount++;
       
-      // create items subcollection
-      dateReceipts.forEach((receipt, position) => {
-        const itemRef = doc(db, 'users', user.uid, 'receipts_by_date', dateId, 'items', position.toString());
+      if (operationCount >= MAX_BATCH_SIZE) {
+        console.log(`committing batch ${++batchCount} with ${operationCount} operations`);
+        await batch.commit();
+        batch = writeBatch(db);
+        operationCount = 0;
+        // small delay to avoid rate limiting
+        await new Promise(r => setTimeout(r, 100));
+      }
+      
+      // create items subcollection with full timestamps preserved
+      for (let i = 0; i < dateReceipts.length; i++) {
+        const receipt = dateReceipts[i];
+        const itemRef = doc(db, 'users', user.uid, 'receipts_by_date', dateId, 'items', i.toString());
         batch.set(itemRef, receipt);
-      });
-    });
+        operationCount++;
+        
+        if (operationCount >= MAX_BATCH_SIZE) {
+          console.log(`committing batch ${++batchCount} with ${operationCount} operations`);
+          await batch.commit();
+          batch = writeBatch(db);
+          operationCount = 0;
+          await new Promise(r => setTimeout(r, 100));
+        }
+      }
+    }
     
-    // save metadata
+    // save metadata in final batch
     const metadataRef = doc(db, 'users', user.uid, 'metadata', 'settings');
     batch.set(metadataRef, {
       bounties: bountiesData,
       untaggedBounties: untaggedData,
       lastUpdated: new Date().toISOString()
     });
+    operationCount++;
     
-    await batch.commit();
+    // commit final batch if it has operations
+    if (operationCount > 0) {
+      console.log(`committing final batch ${++batchCount} with ${operationCount} operations`);
+      await batch.commit();
+    }
+    
     console.log('migration complete');
   };
 
@@ -1101,7 +1131,7 @@ function ReceiptAnalytics() {
             
             <details className="max-w-2xl mx-auto">
               <summary className="text-gray-400 cursor-pointer hover:text-gray-300 text-center mb-6 transition-colors">
-                show setup instructions
+                Show Setup Instructions
               </summary>
               
               <div className="space-y-6 text-left mt-6">
@@ -1111,7 +1141,7 @@ function ReceiptAnalytics() {
                       1
                     </div>
                     <div>
-                      <p className="text-gray-300 mb-2">create a bookmark with this code as the url:</p>
+                      <p className="text-gray-300 mb-2">Create a bookmark with this code as the url:</p>
                       <div className="bg-black rounded p-3 overflow-x-auto">
                         <code className="text-green-400 text-xs break-all">
                           javascript:(function()&#123;const receipts=[];let bounties=[];document.querySelectorAll('div.flex.items-center.px-2').forEach(el=&#62;&#123;const cloutEl=el.querySelector('.text-green-500, .text-red-500, [class*="text-green"], [class*="text-red"]');const clout=cloutEl?parseInt(cloutEl.textContent.replace(/[^\d-]/g,'')):0;const dateEl=el.querySelector('.opacity-60');const date=dateEl?dateEl.textContent.trim():'';const contentEl=el.querySelector('.flex-1.min-w-0');const content=contentEl?contentEl.textContent.trim():'';if(!date||!content)return;let user='you';let concept=null;let action='unknown';if(content.includes('You created a new bounty'))&#123;bounties.push(&#123;clout:Math.abs(clout),date&#125;);action='bounty';&#125;else if(content.includes('daily concept bounty'))&#123;action='daily_bounty';&#125;else if(content.includes('daily sign-in bonus'))&#123;action='daily_signin';&#125;else if(content.includes('You generated a new post draft'))&#123;action='draft_cost';&#125;else if(content.includes('You received a tip from'))&#123;const tipMatch=content.match(/tip from\s+(.+?)\s+for/);user=tipMatch?tipMatch[1]:'unknown';action='tip';&#125;else if(content.includes('You tipped'))&#123;const tipMatch=content.match(/You tipped\s+(.+?)\s+for/);user=tipMatch?tipMatch[1]:'unknown';action='tip_sent';&#125;else if(content.includes('liked your post')||content.includes('liked your song'))&#123;const likeMatch=content.match(/^(.+?)\s+liked/);user=likeMatch?likeMatch[1]:'unknown';action='like';&#125;else if(content.includes('You liked your own'))&#123;action='self_like';&#125;else if(content.includes('listened to your song'))&#123;const listenMatch=content.match(/^(.+?)\s+listened/);user=listenMatch?listenMatch[1]:'unknown';action='listen';&#125;else if(content.includes('replied to your post'))&#123;const replyMatch=content.match(/^(.+?)\s+replied/);user=replyMatch?replyMatch[1]:'unknown';action='reply';&#125;else if(content.includes('used your concept'))&#123;const userMatch=content.match(/^(.+?)\s+used your concept/);user=userMatch?userMatch[1]:'unknown';const conceptMatch=content.match(/concept\s+[^\w\s]*(.+?)\s+to\s+(create|generate)/i);concept=conceptMatch?conceptMatch[1].trim():null;action=conceptMatch?conceptMatch[2]:'use';&#125;receipts.push(&#123;user:user.trim(),action,concept,clout,date,raw:content&#125;);&#125;);const data=&#123;receipts,bounties&#125;;navigator.clipboard.writeText(JSON.stringify(data)).then(()=&#62;alert`Copied $&#123;receipts.length&#125; receipts ($&#123;bounties.length&#125; bounties need tagging)! Paste into dashboard.`);&#125;)();
@@ -1127,8 +1157,13 @@ function ReceiptAnalytics() {
                       2
                     </div>
                     <div className="flex-1">
-                      <p className="text-gray-300">go to your receipts page and click the bookmarklet</p>
-                      <p className="text-gray-500 text-sm mt-1">this will copy your receipt data to clipboard</p>
+                      <p className="text-gray-300 font-semibold mb-2">Go to your receipts page and load all your receipts.</p>
+                      <div className="text-gray-400 text-sm space-y-2">
+                        <p><span className="text-yellow-400">⚠️ Important:</span> The bookmarklet only copies receipts that are currently loaded on the page.</p>
+                        <p>Scroll down slowly to load more receipts.</p>
+                        <p className="text-gray-500 italic">Note: Simcluster currently has a bug where scrolling triggers infinite loading.</p>
+                        <p>Once all the desired receipts are loaded, click the bookmarklet.</p>
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -1139,8 +1174,20 @@ function ReceiptAnalytics() {
                       3
                     </div>
                     <div className="flex-1">
-                      <p className="text-gray-300">come back here and click the button above</p>
-                      <p className="text-gray-500 text-sm mt-1">your data will load automatically</p>
+                      <p className="text-gray-300">You'll see an alert saying how many receipts were copied.</p>
+                      <p className="text-gray-500 text-sm mt-1">The data is now in your clipboard.</p>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="bg-gray-900 rounded p-4 border border-gray-700">
+                  <div className="flex items-start gap-3">
+                    <div className="w-8 h-8 rounded-full bg-green-600 flex items-center justify-center text-white font-bold flex-shrink-0">
+                      4
+                    </div>
+                    <div className="flex-1">
+                      <p className="text-gray-300">Come back here and click the "paste receipt data" button above.</p>
+                      <p className="text-gray-500 text-sm mt-1">Your receipts will load automatically and save to your account.</p>
                     </div>
                   </div>
                 </div>
