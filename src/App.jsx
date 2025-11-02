@@ -1014,10 +1014,10 @@ function ReceiptAnalytics() {
         <div className="mb-8">
           <div className="flex justify-between items-center mb-2">
             <div>
-              <h1 className="text-4xl font-bold text-green-400 mb-1">receipt analytics</h1>
+              <h1 className="text-4xl font-bold text-green-400 mb-1">Simcluster analytics</h1>
               {user && username && (
                 <p className="text-2xl text-gray-300">
-                  welcome <span className="text-green-300 font-semibold">{username}</span>
+                  Welcome <span className="text-green-300 font-semibold">{username}</span>
                 </p>
               )}
             </div>
@@ -1047,7 +1047,7 @@ function ReceiptAnalytics() {
                   {/* dollar sign on jar */}
                   <text x="12" y="13" fontSize="6" fill="currentColor" textAnchor="middle" opacity="0.5">$</text>
                 </svg>
-                <span className="font-mono">tip jar</span>
+                <span className="font-mono">Tip Jar</span>
               </a>
               {user ? (
                 <button
@@ -1072,8 +1072,8 @@ function ReceiptAnalytics() {
           <div className="flex items-center gap-4 flex-wrap">
             <p className="text-gray-400">
               {receipts.length > 0 
-                ? `showing ${filteredReceipts.length} of ${receipts.length} receipts`
-                : 'no data yet - run the bookmarklet on your receipts page'}
+                ? `Showing ${filteredReceipts.length} of ${receipts.length} receipts`
+                : 'No data yet. Run the bookmarklet on your receipts page'}
             </p>
             {receipts.length > 0 && (
               <>
@@ -1102,8 +1102,8 @@ function ReceiptAnalytics() {
         {showSavePrompt && (
           <div className="bg-yellow-900 border border-yellow-700 rounded-lg p-4 mb-6 flex justify-between items-center">
             <div>
-              <p className="text-yellow-300 font-bold">save your data</p>
-              <p className="text-yellow-200 text-sm">sign up to sync your receipts across devices</p>
+              <p className="text-yellow-300 font-bold">Save your data</p>
+              <p className="text-yellow-200 text-sm">Sign up to sync your receipts across devices.</p>
             </div>
             <button
               onClick={() => {
@@ -1112,7 +1112,7 @@ function ReceiptAnalytics() {
               }}
               className="px-6 py-2 bg-yellow-600 hover:bg-yellow-700 text-white rounded transition-colors"
             >
-              sign up
+              Sign up
             </button>
           </div>
         )}
@@ -1120,18 +1120,18 @@ function ReceiptAnalytics() {
         {receipts.length === 0 && (
           <div className="bg-gray-800 rounded-lg p-12 border border-gray-700">
             <div className="text-center mb-8">
-              <p className="text-gray-400 text-lg mb-4">waiting for data...</p>
+              <p className="text-gray-400 text-lg mb-4">Waiting for data...</p>
               <button
                 onClick={handlePaste}
                 className="px-8 py-3 bg-green-600 hover:bg-green-700 text-white rounded-lg transition-colors text-lg font-medium mb-6"
               >
-                paste receipt data
+                Paste receipt data
               </button>
             </div>
             
             <details className="max-w-2xl mx-auto">
               <summary className="text-gray-400 cursor-pointer hover:text-gray-300 text-center mb-6 transition-colors">
-                show setup instructions
+                Show setup instructions
               </summary>
               
               <div className="space-y-6 text-left mt-6">
@@ -1141,7 +1141,7 @@ function ReceiptAnalytics() {
                       1
                     </div>
                     <div>
-                      <p className="text-gray-300 mb-2">create a bookmark with this code as the url:</p>
+                      <p className="text-gray-300 mb-2">Create a bookmark with this code as the url:</p>
                       <div className="bg-black rounded p-3 overflow-x-auto relative group">
                         <button
                           onClick={() => {
@@ -1161,22 +1161,7 @@ function ReceiptAnalytics() {
                   </div>
                 </div>
 
-                <div className="bg-gray-900 rounded p-4 border border-gray-700">
-                  <div className="flex items-start gap-3">
-                    <div className="w-8 h-8 rounded-full bg-green-600 flex items-center justify-center text-white font-bold flex-shrink-0">
-                      2
-                    </div>
-                    <div className="flex-1">
-                      <p className="text-gray-300 font-semibold mb-2">go to your receipts page and load all your receipts</p>
-                      <div className="text-gray-400 text-sm space-y-2">
-                        <p><span className="text-yellow-400">⚠️ important:</span> the bookmarklet only copies receipts that are currently loaded on the page</p>
-                        <p>scroll down slowly to load more receipts (they load as you scroll)</p>
-                        <p className="text-gray-500 italic">note: simcluster currently has a bug where scrolling triggers infinite loading. if this happens, just wait for it to load everything or refresh and try again later</p>
-                        <p>once all your receipts are loaded, click the bookmarklet</p>
-                      </div>
-                    </div>
-                  </div>
-                </div>
+                <div class="bg-gray-900 rounded p-4 border border-gray-700"><div class="flex items-start gap-3"><div class="w-8 h-8 rounded-full bg-green-600 flex items-center justify-center text-white font-bold flex-shrink-0">2</div><div class="flex-1"><p class="text-gray-300 font-semibold mb-2">Go to your receipts page and load all your receipts.</p><div class="text-gray-400 text-sm space-y-2"><p><span class="text-yellow-400">⚠️ Important:</span> The bookmarklet only copies receipts that are currently loaded on the page.</p><p>Scroll down slowly to load more receipts.</p><p class="text-gray-500 italic">Note: Simcluster currently has a bug where scrolling triggers infinite loading.</p><p>Once all the desired receipts are loaded, click the bookmarklet.</p></div></div></div></div>
 
                 <div className="bg-gray-900 rounded p-4 border border-gray-700">
                   <div className="flex items-start gap-3">
@@ -1184,8 +1169,8 @@ function ReceiptAnalytics() {
                       3
                     </div>
                     <div className="flex-1">
-                      <p className="text-gray-300">you'll see an alert saying how many receipts were copied</p>
-                      <p className="text-gray-500 text-sm mt-1">the data is now in your clipboard</p>
+                      <p className="text-gray-300">You'll see an alert saying how many receipts were copied.</p>
+                      <p className="text-gray-500 text-sm mt-1">The data is now in your clipboard.</p>
                     </div>
                   </div>
                 </div>
@@ -1196,8 +1181,8 @@ function ReceiptAnalytics() {
                       4
                     </div>
                     <div className="flex-1">
-                      <p className="text-gray-300">come back here and click the "paste receipt data" button above</p>
-                      <p className="text-gray-500 text-sm mt-1">your receipts will load automatically and save to your account</p>
+                      <p className="text-gray-300">Come back here and click the "paste receipt data" button above.</p>
+                      <p className="text-gray-500 text-sm mt-1">Your receipts will load automatically and save to your account.</p>
                     </div>
                   </div>
                 </div>
@@ -1513,7 +1498,7 @@ function ReceiptAnalytics() {
           <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
             <div className="bg-gray-800 rounded-lg p-6 max-w-md w-full mx-4 border border-gray-700">
               <h3 className="text-xl font-bold text-green-400 mb-4">
-                {authMode === 'signup' ? 'create account' : 'login'}
+                {authMode === 'signup' ? 'create account' : 'Login'}
               </h3>
               
               <form onSubmit={handleAuth} className="space-y-4">
