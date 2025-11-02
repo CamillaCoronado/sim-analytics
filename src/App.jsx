@@ -1,5 +1,5 @@
 import React, { useState, useEffect, createContext, useContext } from 'react';
-import { BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
+import { BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, Legend } from 'recharts';
 import { 
   createUserWithEmailAndPassword, 
   signInWithEmailAndPassword, 
@@ -10,11 +10,23 @@ import {
   doc, 
   setDoc, 
   getDoc, 
-  updateDoc 
+  updateDoc,
+  collection,
+  getDocs,
+  writeBatch,
+  deleteDoc,
+  query,
+  orderBy,
+  limit as firestoreLimit
 } from 'firebase/firestore';
 import { auth, db } from './firebase';
 
-const COLORS = ['#10b981', '#3b82f6', '#8b5cf6', '#f59e0b', '#ef4444'];
+const COLORS = [
+  '#10b981', '#3b82f6', '#8b5cf6', '#f59e0b', '#ef4444', 
+  '#06b6d4', '#84cc16', '#ec4899', '#f97316', '#14b8a6', 
+  '#a855f7', '#eab308', '#6366f1', '#22d3ee', '#f43f5e',
+  '#8b5cf6', '#22c55e', '#fb923c', '#818cf8', '#34d399'
+];
 
 // auth context
 const AuthContext = createContext();
@@ -68,10 +80,11 @@ function ReceiptAnalytics() {
   const [selectedConcept, setSelectedConcept] = useState('');
   const [activeTab, setActiveTab] = useState('concepts');
   const [username, setUsername] = useState('');
+  const [isLoading, setIsLoading] = useState(false);
   
   // auth ui state
   const [showAuthModal, setShowAuthModal] = useState(false);
-  const [authMode, setAuthMode] = useState('login'); // 'login' or 'signup'
+  const [authMode, setAuthMode] = useState('login');
   const [authEmail, setAuthEmail] = useState('');
   const [authPassword, setAuthPassword] = useState('');
   const [authUsername, setAuthUsername] = useState('');
@@ -83,18 +96,36 @@ function ReceiptAnalytics() {
     if (authLoading) return;
 
     if (user) {
-      // logged in - load from firestore
       loadFromFirestore();
       loadUsername();
     } else {
-      // not logged in - clear localStorage on refresh and start fresh
-      localStorage.removeItem('receipt_data');
-      localStorage.removeItem('bounty_data');
-      localStorage.removeItem('untagged_bounties');
-      setReceipts([]);
-      setBounties({});
-      setUntaggedBounties([]);
-      setUsername('');
+      // load from localStorage
+      const stored = localStorage.getItem('receipt_data');
+      if (stored) {
+        try {
+          setReceipts(JSON.parse(stored));
+        } catch (e) {
+          console.error('failed to parse stored receipts:', e);
+        }
+      }
+      
+      const storedBounties = localStorage.getItem('bounty_data');
+      if (storedBounties) {
+        try {
+          setBounties(JSON.parse(storedBounties));
+        } catch (e) {
+          console.error('failed to parse bounties:', e);
+        }
+      }
+
+      const storedUntagged = localStorage.getItem('untagged_bounties');
+      if (storedUntagged) {
+        try {
+          setUntaggedBounties(JSON.parse(storedUntagged));
+        } catch (e) {
+          console.error('failed to parse untagged bounties:', e);
+        }
+      }
     }
   }, [user, authLoading]);
 
@@ -106,38 +137,6 @@ function ReceiptAnalytics() {
       setShowSavePrompt(false);
     }
   }, [user, receipts.length]);
-
-  const loadFromLocalStorage = () => {
-    // this function is now unused - keeping for reference but localStorage
-    // is cleared on refresh for non-authenticated users
-    const stored = localStorage.getItem('receipt_data');
-    if (stored) {
-      try {
-        const parsed = JSON.parse(stored);
-        setReceipts(parsed);
-      } catch (e) {
-        console.error('failed to parse stored receipts:', e);
-      }
-    }
-    
-    const storedBounties = localStorage.getItem('bounty_data');
-    if (storedBounties) {
-      try {
-        setBounties(JSON.parse(storedBounties));
-      } catch (e) {
-        console.error('failed to parse bounties:', e);
-      }
-    }
-
-    const storedUntagged = localStorage.getItem('untagged_bounties');
-    if (storedUntagged) {
-      try {
-        setUntaggedBounties(JSON.parse(storedUntagged));
-      } catch (e) {
-        console.error('failed to parse untagged bounties:', e);
-      }
-    }
-  };
 
   const loadUsername = async () => {
     if (!user) return;
@@ -157,74 +156,235 @@ function ReceiptAnalytics() {
   const loadFromFirestore = async () => {
     if (!user) return;
     
+    console.log('starting firestore load...');
+    setIsLoading(true);
     try {
-      const docRef = doc(db, 'userData', user.uid);
-      const docSnap = await getDoc(docRef);
+      // load all date subcollections
+      console.log('fetching date documents...');
+      const receiptsByDateRef = collection(db, 'users', user.uid, 'receipts_by_date');
+      const datesSnap = await getDocs(receiptsByDateRef);
+      console.log(`found ${datesSnap.docs.length} date documents`);
       
-      if (docSnap.exists()) {
-        const data = docSnap.data();
-        setReceipts(data.receipts || []);
+      // load all date items in parallel instead of sequentially
+      console.log('loading items from all dates in parallel...');
+      const datePromises = datesSnap.docs.map(async (dateDoc) => {
+        const itemsRef = collection(db, 'users', user.uid, 'receipts_by_date', dateDoc.id, 'items');
+        const itemsSnap = await getDocs(itemsRef);
+        console.log(`loaded ${itemsSnap.docs.length} items from ${dateDoc.id}`);
+        return itemsSnap.docs.map(itemDoc => itemDoc.data());
+      });
+      
+      const dateResults = await Promise.all(datePromises);
+      const loadedReceipts = dateResults.flat();
+      console.log(`total receipts loaded: ${loadedReceipts.length}`);
+      
+      // load metadata (bounties, untagged)
+      console.log('loading metadata...');
+      const metadataRef = doc(db, 'users', user.uid, 'metadata', 'settings');
+      const metadataSnap = await getDoc(metadataRef);
+      
+      if (metadataSnap.exists()) {
+        const data = metadataSnap.data();
         setBounties(data.bounties || {});
         setUntaggedBounties(data.untaggedBounties || []);
-      } else {
-        // first time login - migrate localStorage data if exists
-        const localReceipts = localStorage.getItem('receipt_data');
-        const localBounties = localStorage.getItem('bounty_data');
-        const localUntagged = localStorage.getItem('untagged_bounties');
+        console.log('metadata loaded');
+      }
+      
+      setReceipts(loadedReceipts);
+      console.log('receipts set in state');
+      
+      // if we just migrated from localStorage, clear it
+      if (loadedReceipts.length > 0) {
+        localStorage.removeItem('receipt_data');
+        localStorage.removeItem('bounty_data');
+        localStorage.removeItem('untagged_bounties');
+      }
+      
+      // check if we need to migrate from old structure
+      if (loadedReceipts.length === 0) {
+        console.log('no receipts found, checking for migration...');
+        // try old flat receipts structure
+        const oldReceiptsRef = collection(db, 'users', user.uid, 'receipts');
+        const oldReceiptsSnap = await getDocs(oldReceiptsRef);
         
-        if (localReceipts || localBounties || localUntagged) {
-          const receiptsData = localReceipts ? JSON.parse(localReceipts) : [];
-          const bountiesData = localBounties ? JSON.parse(localBounties) : {};
-          const untaggedData = localUntagged ? JSON.parse(localUntagged) : [];
-          
-          await setDoc(docRef, {
-            receipts: receiptsData,
-            bounties: bountiesData,
-            untaggedBounties: untaggedData,
-            lastUpdated: new Date().toISOString()
+        if (!oldReceiptsSnap.empty) {
+          console.log('migrating from old flat structure...');
+          const oldReceipts = [];
+          oldReceiptsSnap.forEach((doc) => {
+            oldReceipts.push(doc.data());
           });
           
-          setReceipts(receiptsData);
-          setBounties(bountiesData);
-          setUntaggedBounties(untaggedData);
+          const metadataSnap = await getDoc(metadataRef);
+          const oldBounties = metadataSnap.exists() ? (metadataSnap.data().bounties || {}) : {};
+          const oldUntagged = metadataSnap.exists() ? (metadataSnap.data().untaggedBounties || []) : [];
           
-          // clear localStorage after migration
-          localStorage.removeItem('receipt_data');
-          localStorage.removeItem('bounty_data');
-          localStorage.removeItem('untagged_bounties');
+          await migrateToSubcollections(oldReceipts, oldBounties, oldUntagged);
+          
+          // delete old structure
+          const batch = writeBatch(db);
+          oldReceiptsSnap.forEach((doc) => {
+            batch.delete(doc.ref);
+          });
+          await batch.commit();
+          
+          setReceipts(oldReceipts);
+          setBounties(oldBounties);
+          setUntaggedBounties(oldUntagged);
+        } else {
+          // try really old userData structure
+          const oldDocRef = doc(db, 'userData', user.uid);
+          const oldDocSnap = await getDoc(oldDocRef);
+          
+          if (oldDocSnap.exists()) {
+            console.log('migrating from really old structure...');
+            const oldData = oldDocSnap.data();
+            await migrateToSubcollections(oldData.receipts || [], oldData.bounties || {}, oldData.untaggedBounties || []);
+            await deleteDoc(oldDocRef);
+          } else {
+            // check localStorage for first-time migration
+            const localReceipts = localStorage.getItem('receipt_data');
+            const localBounties = localStorage.getItem('bounty_data');
+            const localUntagged = localStorage.getItem('untagged_bounties');
+            
+            if (localReceipts || localBounties || localUntagged) {
+              console.log('migrating from localStorage...');
+              const receiptsData = localReceipts ? JSON.parse(localReceipts) : [];
+              const bountiesData = localBounties ? JSON.parse(localBounties) : {};
+              const untaggedData = localUntagged ? JSON.parse(localUntagged) : [];
+              
+              await migrateToSubcollections(receiptsData, bountiesData, untaggedData);
+              
+              setReceipts(receiptsData);
+              setBounties(bountiesData);
+              setUntaggedBounties(untaggedData);
+              
+              localStorage.removeItem('receipt_data');
+              localStorage.removeItem('bounty_data');
+              localStorage.removeItem('untagged_bounties');
+            }
+          }
         }
       }
+      console.log('firestore load complete');
     } catch (e) {
       console.error('failed to load from firestore:', e);
+    } finally {
+      setIsLoading(false);
+      console.log('loading flag set to false');
     }
+  };
+
+  const migrateToSubcollections = async (receiptsData, bountiesData, untaggedData) => {
+    if (!user) return;
+    
+    console.log(`migrating ${receiptsData.length} receipts to date-based subcollections...`);
+    
+    const batch = writeBatch(db);
+    
+    // group receipts by date
+    const receiptsByDate = {};
+    let skippedCount = 0;
+    receiptsData.forEach((receipt, index) => {
+      if (!receipt.date || !receipt.date.trim()) {
+        console.error('skipping receipt with missing date during migration:', receipt);
+        skippedCount++;
+        return;
+      }
+      if (!receiptsByDate[receipt.date]) {
+        receiptsByDate[receipt.date] = [];
+      }
+      receiptsByDate[receipt.date].push({ ...receipt, originalIndex: index });
+    });
+    
+    if (skippedCount > 0) {
+      console.warn(`skipped ${skippedCount} receipts with missing dates during migration`);
+    }
+    
+    // save each date's receipts to its own subcollection
+    Object.entries(receiptsByDate).forEach(([date, dateReceipts]) => {
+      const dateId = date.replace(/[^a-zA-Z0-9]/g, '_');
+      
+      // create the date document itself so firestore can list it
+      const dateDocRef = doc(db, 'users', user.uid, 'receipts_by_date', dateId);
+      batch.set(dateDocRef, { 
+        date: date,
+        itemCount: dateReceipts.length,
+        lastUpdated: new Date().toISOString()
+      });
+      
+      // create items subcollection
+      dateReceipts.forEach((receipt, position) => {
+        const itemRef = doc(db, 'users', user.uid, 'receipts_by_date', dateId, 'items', position.toString());
+        batch.set(itemRef, receipt);
+      });
+    });
+    
+    // save metadata
+    const metadataRef = doc(db, 'users', user.uid, 'metadata', 'settings');
+    batch.set(metadataRef, {
+      bounties: bountiesData,
+      untaggedBounties: untaggedData,
+      lastUpdated: new Date().toISOString()
+    });
+    
+    await batch.commit();
+    console.log('migration complete');
   };
 
   const saveToStorage = async (newReceipts, newBounties, newUntagged) => {
     if (user) {
-      // logged in - save to firestore only, never localStorage
+      setIsLoading(true);
       try {
-        const docRef = doc(db, 'userData', user.uid);
-        await updateDoc(docRef, {
-          receipts: newReceipts,
+        const batch = writeBatch(db);
+        
+        // group receipts by date
+        const receiptsByDate = {};
+        newReceipts.forEach((receipt, index) => {
+          if (!receipt.date || !receipt.date.trim()) {
+            console.error('skipping receipt with missing date during save:', receipt);
+            return;
+          }
+          if (!receiptsByDate[receipt.date]) {
+            receiptsByDate[receipt.date] = [];
+          }
+          receiptsByDate[receipt.date].push({ ...receipt, originalIndex: index });
+        });
+        
+        // save each date's receipts to its own subcollection
+        Object.entries(receiptsByDate).forEach(([date, dateReceipts]) => {
+          const dateId = date.replace(/[^a-zA-Z0-9]/g, '_');
+          
+          // create the date document itself so firestore can list it
+          const dateDocRef = doc(db, 'users', user.uid, 'receipts_by_date', dateId);
+          batch.set(dateDocRef, { 
+            date: date,
+            itemCount: dateReceipts.length,
+            lastUpdated: new Date().toISOString()
+          });
+          
+          // create items subcollection
+          dateReceipts.forEach((receipt, position) => {
+            const itemRef = doc(db, 'users', user.uid, 'receipts_by_date', dateId, 'items', position.toString());
+            batch.set(itemRef, receipt);
+          });
+        });
+        
+        // save metadata
+        const metadataRef = doc(db, 'users', user.uid, 'metadata', 'settings');
+        batch.set(metadataRef, {
           bounties: newBounties,
           untaggedBounties: newUntagged,
           lastUpdated: new Date().toISOString()
-        });
+        }, { merge: true });
+        
+        await batch.commit();
       } catch (e) {
-        // if doc doesn't exist, create it
-        try {
-          await setDoc(doc(db, 'userData', user.uid), {
-            receipts: newReceipts,
-            bounties: newBounties,
-            untaggedBounties: newUntagged,
-            lastUpdated: new Date().toISOString()
-          });
-        } catch (e2) {
-          console.error('failed to save to firestore:', e2);
-        }
+        console.error('failed to save to firestore:', e);
+      } finally {
+        setIsLoading(false);
       }
     } else {
-      // not logged in - save to localStorage temporarily (will be cleared on refresh)
+      // save to localStorage temporarily
       localStorage.setItem('receipt_data', JSON.stringify(newReceipts));
       localStorage.setItem('bounty_data', JSON.stringify(newBounties));
       localStorage.setItem('untagged_bounties', JSON.stringify(newUntagged));
@@ -274,29 +434,80 @@ function ReceiptAnalytics() {
       let newUntagged = [...untaggedBounties];
       let addedCount = 0;
       let addedBounties = 0;
+      let skippedCount = 0;
       
       if (parsed.receipts && Array.isArray(parsed.receipts)) {
-        // dedupe by date field (timestamp)
-        const existingDates = new Set(receipts.map(r => r.date));
-        
-        parsed.receipts.forEach(receipt => {
-          if (!existingDates.has(receipt.date)) {
-            newReceipts.push(receipt);
-            existingDates.add(receipt.date);
-            addedCount++;
+        // group existing receipts by date to track positions within each date
+        const existingByDate = {};
+        receipts.forEach((receipt) => {
+          if (!existingByDate[receipt.date]) {
+            existingByDate[receipt.date] = [];
           }
+          existingByDate[receipt.date].push(receipt);
+        });
+        
+        // group incoming receipts by date to get their position within that date
+        const incomingByDate = {};
+        parsed.receipts.forEach((receipt) => {
+          if (!receipt.date || !receipt.date.trim()) {
+            console.error('skipping receipt with missing date:', receipt);
+            skippedCount++;
+            return;
+          }
+          if (!incomingByDate[receipt.date]) {
+            incomingByDate[receipt.date] = [];
+          }
+          incomingByDate[receipt.date].push(receipt);
+        });
+        
+        // for each date, check which positions we don't have yet
+        Object.entries(incomingByDate).forEach(([date, incomingDateReceipts]) => {
+          const existingDateReceipts = existingByDate[date] || [];
+          
+          incomingDateReceipts.forEach((receipt, positionInDate) => {
+            // do we already have a receipt at this position for this date?
+            if (positionInDate >= existingDateReceipts.length) {
+              // nope, this is a new position for this date
+              newReceipts.push(receipt);
+              existingDateReceipts.push(receipt); // track it so we don't add dupes within this paste
+              addedCount++;
+            }
+            // if positionInDate < existingDateReceipts.length, we already have something at this position - skip it
+          });
         });
         
         if (parsed.bounties && parsed.bounties.length > 0) {
-          // dedupe bounties by date too
-          const existingBountyDates = new Set(untaggedBounties.map(b => b.date));
-          
-          parsed.bounties.forEach(bounty => {
-            if (!existingBountyDates.has(bounty.date)) {
-              newUntagged.push(bounty);
-              existingBountyDates.add(bounty.date);
-              addedBounties++;
+          // same logic for bounties
+          const existingBountiesByDate = {};
+          untaggedBounties.forEach((bounty) => {
+            if (!existingBountiesByDate[bounty.date]) {
+              existingBountiesByDate[bounty.date] = [];
             }
+            existingBountiesByDate[bounty.date].push(bounty);
+          });
+          
+          const incomingBountiesByDate = {};
+          parsed.bounties.forEach((bounty) => {
+            if (!bounty.date || !bounty.date.trim()) {
+              console.error('skipping bounty with missing date:', bounty);
+              return;
+            }
+            if (!incomingBountiesByDate[bounty.date]) {
+              incomingBountiesByDate[bounty.date] = [];
+            }
+            incomingBountiesByDate[bounty.date].push(bounty);
+          });
+          
+          Object.entries(incomingBountiesByDate).forEach(([date, incomingDateBounties]) => {
+            const existingDateBounties = existingBountiesByDate[date] || [];
+            
+            incomingDateBounties.forEach((bounty, positionInDate) => {
+              if (positionInDate >= existingDateBounties.length) {
+                newUntagged.push(bounty);
+                existingDateBounties.push(bounty);
+                addedBounties++;
+              }
+            });
           });
         }
         
@@ -304,28 +515,50 @@ function ReceiptAnalytics() {
         setUntaggedBounties(newUntagged);
         
         if (addedCount === 0 && addedBounties === 0) {
-          alert('no new data found - all receipts already loaded');
+          alert(`no new data found - all receipts already loaded${skippedCount > 0 ? ` (${skippedCount} skipped due to missing dates)` : ''}`);
         } else {
-          alert(`added ${addedCount} new receipts. ${addedBounties > 0 ? `${addedBounties} new bounties need tagging.` : ''}`);
+          alert(`added ${addedCount} new receipts${skippedCount > 0 ? ` (${skippedCount} skipped due to missing dates)` : ''}. ${addedBounties > 0 ? `${addedBounties} new bounties need tagging.` : ''}`);
         }
       } else if (Array.isArray(parsed)) {
-        // legacy format - array of receipts
-        const existingDates = new Set(receipts.map(r => r.date));
-        
-        parsed.forEach(receipt => {
-          if (!existingDates.has(receipt.date)) {
-            newReceipts.push(receipt);
-            existingDates.add(receipt.date);
-            addedCount++;
+        const existingByDate = {};
+        receipts.forEach((receipt) => {
+          if (!existingByDate[receipt.date]) {
+            existingByDate[receipt.date] = [];
           }
+          existingByDate[receipt.date].push(receipt);
+        });
+        
+        const incomingByDate = {};
+        parsed.forEach((receipt) => {
+          if (!receipt.date || !receipt.date.trim()) {
+            console.error('skipping receipt with missing date:', receipt);
+            skippedCount++;
+            return;
+          }
+          if (!incomingByDate[receipt.date]) {
+            incomingByDate[receipt.date] = [];
+          }
+          incomingByDate[receipt.date].push(receipt);
+        });
+        
+        Object.entries(incomingByDate).forEach(([date, incomingDateReceipts]) => {
+          const existingDateReceipts = existingByDate[date] || [];
+          
+          incomingDateReceipts.forEach((receipt, positionInDate) => {
+            if (positionInDate >= existingDateReceipts.length) {
+              newReceipts.push(receipt);
+              existingDateReceipts.push(receipt);
+              addedCount++;
+            }
+          });
         });
         
         setReceipts(newReceipts);
         
         if (addedCount === 0) {
-          alert('no new data found - all receipts already loaded');
+          alert(`no new data found - all receipts already loaded${skippedCount > 0 ? ` (${skippedCount} skipped due to missing dates)` : ''}`);
         } else {
-          alert(`added ${addedCount} new receipts`);
+          alert(`added ${addedCount} new receipts${skippedCount > 0 ? ` (${skippedCount} skipped due to missing dates)` : ''}`);
         }
       }
       
@@ -337,10 +570,54 @@ function ReceiptAnalytics() {
   };
 
   const handleClear = async () => {
+    if (!confirm('are you sure? this will delete ALL your receipts')) return;
+    
+    setIsLoading(true);
+    
+    if (user) {
+      try {
+        // delete all date subcollections
+        const receiptsByDateRef = collection(db, 'users', user.uid, 'receipts_by_date');
+        const datesSnap = await getDocs(receiptsByDateRef);
+        
+        const batch = writeBatch(db);
+        
+        // for each date, delete all its items
+        for (const dateDoc of datesSnap.docs) {
+          const itemsRef = collection(db, 'users', user.uid, 'receipts_by_date', dateDoc.id, 'items');
+          const itemsSnap = await getDocs(itemsRef);
+          
+          itemsSnap.forEach((itemDoc) => {
+            batch.delete(itemDoc.ref);
+          });
+          
+          // delete the date document itself (after items are deleted)
+          batch.delete(dateDoc.ref);
+        }
+        
+        // clear metadata
+        const metadataRef = doc(db, 'users', user.uid, 'metadata', 'settings');
+        batch.set(metadataRef, {
+          bounties: {},
+          untaggedBounties: [],
+          lastUpdated: new Date().toISOString()
+        });
+        
+        await batch.commit();
+      } catch (e) {
+        console.error('failed to clear firestore:', e);
+      }
+    }
+    
     setReceipts([]);
     setBounties({});
     setUntaggedBounties([]);
-    await saveToStorage([], {}, []);
+    
+    localStorage.removeItem('receipt_data');
+    localStorage.removeItem('bounty_data');
+    localStorage.removeItem('untagged_bounties');
+    
+    setIsLoading(false);
   };
 
   const handleAddBounty = async () => {
@@ -557,7 +834,7 @@ function ReceiptAnalytics() {
       return acc;
     }, []);
 
-  if (authLoading) {
+  if (authLoading || isLoading) {
     return (
       <div className="min-h-screen bg-gradient-to-br from-gray-900 via-green-900 to-gray-900 flex items-center justify-center">
         <div className="text-green-400 text-xl">loading...</div>
@@ -579,6 +856,33 @@ function ReceiptAnalytics() {
               )}
             </div>
             <div className="flex gap-2">
+              <a
+                href="https://buy.stripe.com/test_4gM28q8ev0gV6MA8xX5ZC00"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="px-4 py-2 bg-green-600/20 hover:bg-green-600/30 border border-green-500/50 hover:border-green-400 text-green-400 rounded transition-all flex items-center gap-2 group"
+                title="support the dev"
+              >
+                <svg 
+                  className="w-5 h-5 group-hover:scale-110 transition-transform" 
+                  viewBox="0 0 24 24" 
+                  fill="none" 
+                  stroke="currentColor" 
+                  strokeWidth="2"
+                >
+                  {/* jar body */}
+                  <path d="M6 8 L6 20 C6 21 7 22 8 22 L16 22 C17 22 18 21 18 20 L18 8" strokeLinecap="round"/>
+                  {/* jar lid */}
+                  <rect x="5" y="6" width="14" height="2" rx="1" fill="currentColor" opacity="0.7"/>
+                  {/* coins */}
+                  <circle cx="9" cy="14" r="1.5" fill="currentColor" opacity="0.8"/>
+                  <circle cx="15" cy="16" r="1.5" fill="currentColor" opacity="0.8"/>
+                  <circle cx="12" cy="18" r="1.5" fill="currentColor" opacity="0.8"/>
+                  {/* dollar sign on jar */}
+                  <text x="12" y="13" fontSize="6" fill="currentColor" textAnchor="middle" opacity="0.5">$</text>
+                </svg>
+                <span className="font-mono">tip jar</span>
+              </a>
               {user ? (
                 <button
                   onClick={handleLogout}
@@ -873,8 +1177,13 @@ function ReceiptAnalytics() {
                       <XAxis dataKey="label" stroke="#9ca3af" />
                       <YAxis stroke="#9ca3af" />
                       <Tooltip 
-                        contentStyle={{ backgroundColor: '#1f2937', border: '1px solid #374151' }}
+                        contentStyle={{ 
+                          backgroundColor: '#1f2937', 
+                          border: '1px solid #374151'
+                        }}
+                        itemStyle={{ color: '#fff' }}
                         labelStyle={{ color: '#9ca3af' }}
+                        cursor={{ fill: 'rgba(255, 255, 255, 0.1)' }}
                       />
                       <Line type="monotone" dataKey="total" stroke="#10b981" strokeWidth={2} dot={false} />
                       <Line type="monotone" dataKey="clout" stroke="#3b82f6" strokeWidth={1} dot={false} />
@@ -957,29 +1266,32 @@ function ReceiptAnalytics() {
 
                 <div className="bg-gray-800 rounded-lg p-6 border border-gray-700 mb-8">
                   <h2 className="text-xl font-bold text-green-400 mb-4">action breakdown</h2>
-                  <div className="flex justify-center">
-                    <ResponsiveContainer width="100%" height={300}>
-                      <PieChart>
-                        <Pie
-                          data={actionData}
-                          cx="50%"
-                          cy="50%"
-                          labelLine={false}
-                          label={({ name, percent }) => `${name} ${(percent * 100).toFixed(0)}%`}
-                          outerRadius={100}
-                          fill="#8884d8"
-                          dataKey="value"
-                        >
-                          {actionData.map((entry, index) => (
-                            <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
-                          ))}
-                        </Pie>
-                        <Tooltip 
-                          contentStyle={{ backgroundColor: '#1f2937', border: '1px solid #374151' }}
-                        />
-                      </PieChart>
-                    </ResponsiveContainer>
-                  </div>
+                  <ResponsiveContainer width="100%" height={400}>
+                    <PieChart>
+                      <Pie
+                        data={actionData}
+                        cx="40%"
+                        cy="50%"
+                        outerRadius={120}
+                        fill="#8884d8"
+                        dataKey="value"
+                        label={false}
+                      >
+                        {actionData.map((entry, index) => (
+                          <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
+                        ))}
+                      </Pie>
+                      <Legend 
+                        layout="vertical" 
+                        align="right" 
+                        verticalAlign="middle"
+                        wrapperStyle={{ paddingLeft: '20px' }}
+                      />
+                      <Tooltip 
+                        contentStyle={{ backgroundColor: '#1f2937', border: '1px solid #374151' }}
+                      />
+                    </PieChart>
+                  </ResponsiveContainer>
                 </div>
               </>
             )}
@@ -988,12 +1300,14 @@ function ReceiptAnalytics() {
               <button
                 onClick={handlePaste}
                 className="px-6 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg transition-colors"
+                disabled={isLoading}
               >
                 update data
               </button>
               <button
                 onClick={handleClear}
                 className="px-6 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg transition-colors"
+                disabled={isLoading}
               >
                 clear all data
               </button>
