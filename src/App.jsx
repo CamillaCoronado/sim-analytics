@@ -1023,7 +1023,7 @@ function ReceiptAnalytics() {
             </div>
             <div className="flex gap-2">
               <a
-                href="https://buy.stripe.com/YOUR_PAYMENT_LINK_ID"
+                href="https://buy.stripe.com/4gM28q8ev0gV6MA8xX5ZC00"
                 target="_blank"
                 rel="noopener noreferrer"
                 className="px-4 py-2 bg-green-600/20 hover:bg-green-600/30 border border-green-500/50 hover:border-green-400 text-green-400 rounded transition-all flex items-center gap-2 group"
